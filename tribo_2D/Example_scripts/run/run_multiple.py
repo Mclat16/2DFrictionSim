@@ -1,4 +1,4 @@
-from tribo_2D.afm_simplified import *
+from tribo_2D.afm import *
 from tribo_2D.tools import *
 from tribo_2D.sheet import *
 import os

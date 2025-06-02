@@ -23,6 +23,7 @@ def init_mol(f):
     
     "boundary   	    p p f\n"
     ])
+    
 def thermo_afm(f):
 
     f.writelines([

@@ -1,7 +1,7 @@
-from .tools import *
-from .settings import *
-from .pot import *
-from .build import *
+from ..tools import *
+from ..settings import *
+from ..potentials import *
+from ..build import *
 from ase import data
 import subprocess
 import os

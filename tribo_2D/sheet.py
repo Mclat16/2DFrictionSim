@@ -1,6 +1,6 @@
 from .tools import *
 from .build import *
-from .pot import *
+from .potentials import *
 from .settings.file import *
 from .Potentials import *
 

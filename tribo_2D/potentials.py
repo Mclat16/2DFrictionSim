@@ -2,7 +2,7 @@ from ase import data
 from .tools import *
 
 
-def settings_sheet(var,filename,layer,sheetvsheet=False):
+def sheet(var,filename,layer,sheetvsheet=False):
     """Writes the LAMMPS input file content to the specified filename.
     Args:
     filename (str): The name of the file to write to.
@@ -100,7 +100,7 @@ def settings_sheet(var,filename,layer,sheetvsheet=False):
                                 t1, t2 = t2, t1
                             f.write(f"pair_coeff {t1} {t2} lj/cut {e} {sigma} \n")
         
-def settings_afm(var,layer):
+def afm(var,layer):
 
     """Writes the LAMMPS input file content to the specified filename.
     Args:
@@ -223,9 +223,9 @@ def settings_afm(var,layer):
             for t in var['data']['tip']['elem_comp']:
                 e,sigma = LJparams(s,t)
                 f.write(f"pair_coeff {elemgroup['sub'][t][0]}*{elemgroup['sub'][t][-1]} {elemgroup['tip'][t][0]}*{elemgroup['tip'][t][-1]}  lj/cut {e} {sigma} \n")
-    
+
     return h
-def settings_sb(var,filename,system):
+def single_body_3layer(var,filename,system):
     
     group_def = {}
     elemgroup = {}
@@ -265,7 +265,7 @@ def settings_sb(var,filename,system):
             f"pair_coeff * * {var['pot']['path'][system]} {' '.join((potentials))}\n"])
         
 
-def settings_ob(var,filename,system):
+def single_body(var,filename,system):
     
     group_def = {}
     elemgroup = {}
