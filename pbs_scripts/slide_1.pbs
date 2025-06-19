@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -l select=1:ncpus=32:mem=62gb:mpiprocs=32
-#PBS -l walltime=23:00:00
+#PBS -l walltime=12:00:00
 #PBS -J 1-156
 #PBS -o /rds/general/user/mv923/home/logs_system_1/
 #PBS -e /rds/general/user/mv923/home/logs_system_1/
@@ -8,7 +8,7 @@
 
 module purge
 module load tools/prod
-module load OpenMPI/4.1.4-GCC-12.2.0
+# module load OpenMPI/4.1.4-GCC-12.2.0
 module load LAMMPS/29Aug2024-foss-2023b-kokkos
 
 #Go to the temp directory (ephemeral) and create a new folder for this run
