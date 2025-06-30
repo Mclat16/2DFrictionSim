@@ -299,8 +299,9 @@ class ModelInit:
             'zlo': 0,
             'xhi': self.params['2D']['y'],
             'yhi': self.params['2D']['x'],
-            'zhi': 10
+            'zhi': self.params['sub']['thickness']
         }
+
         self.init_substrate()
 
     def init_sheet(self, sheetvsheet=False):
@@ -505,9 +506,9 @@ class ModelInit:
             self.slab_generator(
                 slab_path,
                 self.params['sub']['cif_path'],
-                self.params['2D']['x'],
-                self.params['2D']['y'],
-                10
+                self.dim['xhi'],
+                self.dim['yhi'],
+                self.params['sub']['thickness']
             )
 
         # Initialize and run LAMMPS to process and trim the substrate slab
@@ -518,7 +519,7 @@ class ModelInit:
             "atom_style      atomic\n",
 
             # Define the simulation box region for the substrate
-            f"region box block {self.dim['xlo']} {self.dim['xhi']} {self.dim['ylo']} {self.dim['yhi']} {self.dim['zlo']} 12\n",
+            f"region box block {self.dim['xlo']} {self.dim['xhi']} {self.dim['ylo']} {self.dim['yhi']} {self.dim['zlo']} {self.params['sub']['thickness']}\n",
             f"create_box       {self.data['sub']['natype']} box\n\n",
             # Read the slab data and append to the box
             f"read_data {slab_path} add append\n",
@@ -528,7 +529,7 @@ class ModelInit:
             "group box subtract all sub\n",
             "delete_atoms group box\n",
             # Adjust the box dimensions to match the simulation box
-            f"change_box all x final {self.dim['xlo']} {self.dim['xhi']} y final {self.dim['ylo']} {self.dim['yhi']} z final {self.dim['zlo']} {self.dim['zhi']}\n\n",
+            f"change_box all x final {self.dim['xlo']} {self.dim['xhi']} y final {self.dim['ylo']} {self.dim['yhi']} z final {self.dim['zlo']}  {self.params['sub']['thickness']}\n\n",
             "reset_atoms     id\n",
             # Write the processed substrate data file
             f"write_data      {self.dir}/build/sub.lmp"
