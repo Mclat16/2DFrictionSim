@@ -529,7 +529,7 @@ class ModelInit:
             "group box subtract all sub\n",
             "delete_atoms group box\n",
             # Adjust the box dimensions to match the simulation box
-            f"change_box all x final {self.dim['xlo']} {self.dim['xhi']} y final {self.dim['ylo']} {self.dim['yhi']} z final {self.dim['zlo']}  {self.params['sub']['thickness']}\n\n",
+            f"change_box all x final {self.dim['xlo']} {self.dim['xhi']} y final {self.dim['ylo']} {self.dim['yhi']} z final -5 {self.params['sub']['thickness']}\n\n",
             "reset_atoms     id\n",
             # Write the processed substrate data file
             f"write_data      {self.dir}/build/sub.lmp"
@@ -578,6 +578,7 @@ class ModelInit:
         # Generate the 2D sheet using Atomsk (initial conversion from CIF)
         atomsk_command = f"echo n | atomsk {self.params['2D']['cif_path']} -ow {filename} -v 0"
         subprocess.run(atomsk_command, shell=True, check=True)
+        # Print the contents of filename after running Atomsk
 
         # If atom types in potential file do not match structure, renumber atom types
         if any(v != 1 for v in self.potentials['2D']['count'].values()) or multiplier != 1:
@@ -647,10 +648,8 @@ class ModelInit:
             __file__), "materials", filename)
         am_filename = os.path.join(os.path.dirname(
             __file__), "materials", f"amor_{filename}")
-        print(am_filename)
         # Only generate if the amorphous file does not already exist
         if not os.path.exists(am_filename):
-            print("file not found")
             # Generate a large enough crystalline slab as the starting structure
             self.slab_generator(
                 slab_path, self.params[system]['cif_path'], 200, 200, 50)
@@ -736,7 +735,7 @@ class ModelInit:
             "neighbor        0.3 bin\n",
             "boundary        p p p\n",
             "neigh_modify    every 1 delay 0 check yes #every 5\n\n",
-            f"region box block {self.dim['xlo']} {self.dim['xhi']} {self.dim['ylo']} {self.dim['yhi']} -50 50\n",
+            f"region box block {self.dim['xlo']} {self.dim['xhi']} {self.dim['ylo']} {self.dim['yhi']} -5 {self.dim['yhi']+6*layer}\n",
             f"create_box       {self.data['2D']['natype']*layer} box\n\n",
             f"read_data       {filename}_1.lmp add append group layer_1 \n",
         ])

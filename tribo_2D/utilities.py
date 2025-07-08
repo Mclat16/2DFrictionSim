@@ -305,6 +305,7 @@ def renumber_atom_types(filename, pot=None):
     atoms_section = False
 
     atom_types = {}
+
     # Parse the "Masses" section to extract atom type IDs, masses, and names
     for i, line in enumerate(lines):
         if line.strip() == 'Masses':
@@ -327,18 +328,18 @@ def renumber_atom_types(filename, pot=None):
             else:
                 atom_type_name = f'Unknown_{atom_type_id}'
             atom_types[atom_type_id] = (atom_type_name, mass)
-
     # Prepare to update atom types in the "Atoms" section
     modified_lines = set()
     mod_lines = {}
     elem_pot = {}
     elem = {}
-
     t_add = len(atom_types) if pot is not None else 1
+    t=1
     # For each atom type, update its ID and collect info
     for i in range(1, len(atom_types)+1):
         atoms_section = False
-        t = i
+        if pot is not None:
+            t = i
         for l, line in enumerate(lines):
             stripped_line = line.strip()
 
@@ -357,10 +358,11 @@ def renumber_atom_types(filename, pot=None):
                     elem[t] = atom_types[i]
                     t += t_add
 
-    a = 1
-    atom_lines = {}
+
     # Assign new atom type numbers according to the order in 'pot'
     if pot is not None:
+        a = 1
+        atom_lines = {}
         for i in pot:
             atoms_section = False
             for l in range(1, len(mod_lines)+1):

@@ -17,4 +17,3 @@ cd $EPHEMERAL
 # $PBS_O_WORKDIR is the directory where the pbs script was sent from.
 
 mpiexec lmp -l none -in $(sed -n "${PBS_ARRAY_INDEX}p" $PBS_O_WORKDIR/list_slide_1.txt)
-

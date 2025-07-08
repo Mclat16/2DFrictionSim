@@ -70,7 +70,7 @@ class AFMSimulation(model_init.ModelInit):
             # --- Create the system input file ---
             lammps_lines = [
                 "comm_style tiled\n",
-                f"region box block {self.dim['xlo']} {self.dim['xhi']} {self.dim['ylo']} {self.dim['yhi']} -5 100\n",
+                f"region box block {self.dim['xlo']} {self.dim['xhi']} {self.dim['ylo']} {self.dim['yhi']} -5 {tip_z + self.params['tip']['r']}\n",
                 f"create_box      {self.ngroups[layer]} box\n\n",
 
                 "#----------------- Read data files -----------------------\n\n",
@@ -287,8 +287,9 @@ class AFMSimulation(model_init.ModelInit):
             f_zlo, f_zhi = h - 3, 'INF'
             t_zlo, t_zhi = h - 5, h - 3
         elif system == 'sub':
-            f_zlo, f_zhi = 'INF', 0.2*self.params['sub']['thickness']
-            t_zlo, t_zhi = f_zhi, 0.5*self.params['sub']['thickness']
+            f_zlo, f_zhi = 'INF', 0.3*self.params['sub']['thickness']
+            t_zlo, t_zhi = f_zhi, 0.6*self.params['sub']['thickness']
+            h = self.params['sub']['thickness']
         dim = utilities.get_model_dimensions(f'{self.dir}/build/{system}.lmp')
         potential_file = f'{self.dir}/build/{system}_3layers.in.settings'
         self.__single_body_3layer(potential_file, system)
@@ -297,7 +298,7 @@ class AFMSimulation(model_init.ModelInit):
             "boundary p p p\n",
             "units metal\n",
             "atom_style      atomic\n",
-            f"region box block {dim['xlo']} {dim['xhi']} {dim['ylo']} {dim['yhi']} -5 100\n",
+            f"region box block {dim['xlo']} {dim['xhi']} {dim['ylo']} {dim['yhi']} -5 {h}\n",
             f"create_box      {self.data[system]['natype']*3} box\n\n",
             f"read_data       {self.dir}/build/{system}.lmp add append\n",
             f"include         {potential_file}\n\n",
