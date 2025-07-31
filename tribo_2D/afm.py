@@ -94,9 +94,9 @@ class AFMSimulation(model_init.ModelInit):
                 "group           fixset union sub_fix tip_all\n",
                 "group           system subtract all fixset\n\n",
                 f"velocity        system create {self.params['general']['temproom']} 492847948\n\n",
-                "compute         temp_tip tip_thermo temp/partial 0 1 0\n",
-                f"fix             lang_tip tip_thermo langevin {self.params['general']['temproom']} {self.params['general']['temproom']} $(100.0*dt) 699483 zero yes\n",
-                "fix_modify      lang_tip temp temp_tip\n\n",
+                # "compute         temp_tip tip_thermo temp/partial 0 1 0\n",
+                # f"fix             lang_tip tip_thermo langevin {self.params['general']['temproom']} {self.params['general']['temproom']} $(100.0*dt) 699483 zero yes\n",
+                # "fix_modify      lang_tip temp temp_tip\n\n",
                 "compute         temp_sub sub_thermo temp/partial 0 1 0\n",
                 f"fix             lang_sub sub_thermo langevin {self.params['general']['temproom']} {self.params['general']['temproom']} $(100.0*dt) 2847563 zero yes\n",
                 "fix_modify      lang_sub temp temp_sub\n\n",
@@ -129,8 +129,8 @@ class AFMSimulation(model_init.ModelInit):
                 "label loop_load\n\n",
                 "variable f equal ${f}+${fincr} \n\n",
                 "# Set force variable\n\n",
-                "variable Fatom equal -v_f/(count(tip_fix)*1.602176565)\n",
-                "fix forcetip tip_fix aveforce 0.0 0.0 ${Fatom}\n",
+                "variable Fatom equal -v_f/(count(tip_all)*1.602176565)\n",
+                "fix forcetip tip_all aveforce 0.0 0.0 ${Fatom}\n",
                 "run 100 \n\n",
                 "unfix forcetip\n\n",
                 "next i\n",
@@ -138,8 +138,8 @@ class AFMSimulation(model_init.ModelInit):
                 "##########################################################\n",
                 "#---------------------Equilibration----------------------#\n",
                 "##########################################################\n\n",
-                "fix forcetip tip_fix aveforce 0.0 0.0 ${Fatom}\n",
-                "variable        dispz equal xcm(tip_fix,z)\n\n",
+                "fix forcetip tip_all aveforce 0.0 0.0 ${Fatom}\n",
+                "variable        dispz equal xcm(tip_all,z)\n\n",
                 "run 100 pre yes post no\n\n",
                 "# Prepare to loop for displacement checks\n\n",
                 "label check_r\n\n",
@@ -198,6 +198,7 @@ class AFMSimulation(model_init.ModelInit):
                     f"variable a index 0 {' '.join(str(x) for x in self.scan_angle)} 0\n",
                     "label angle_loop\n",
                 ])
+                
                 settings.file.init(f)
 
                 f.writelines([
@@ -219,9 +220,9 @@ class AFMSimulation(model_init.ModelInit):
                     "fix             tip_f tip_all rigid/nve single force * on on on torque * off off off\n\n",
 
                     "#----------------- Apply Langevin thermostat -------------\n\n",
-                    "compute         temp_tip tip_thermo temp/partial 0 1 0\n",
-                    f"fix             lang_tip tip_thermo langevin {self.params['general']['temproom']} {self.params['general']['temproom']} $(100.0*dt) 699483 zero yes\n",
-                    "fix_modify      lang_tip temp temp_tip\n\n",
+                    # "compute         temp_tip tip_thermo temp/partial 0 1 0\n",
+                    # f"fix             lang_tip tip_thermo langevin {self.params['general']['temproom']} {self.params['general']['temproom']} $(100.0*dt) 699483 zero yes\n",
+                    # "fix_modify      lang_tip temp temp_tip\n\n",
                     "compute         temp_base sub_thermo temp/partial 0 1 0\n",
                     f"fix             lang_bot sub_thermo langevin {self.params['general']['temproom']} {self.params['general']['temproom']} $(100.0*dt) 2847563 zero yes\n",
                     "fix_modify      lang_bot temp temp_base\n\n",
@@ -232,8 +233,8 @@ class AFMSimulation(model_init.ModelInit):
 
                     "#----------------- Apply pressure to the tip -------------\n\n",
                     "variable        Ftotal          equal -v_find/1.602176565\n",
-                    "variable        Fatom           equal v_Ftotal/count(tip_fix)\n",
-                    "fix             forcetip tip_fix aveforce 0.0 0.0 ${Fatom}\n\n",
+                    "variable        Fatom           equal v_Ftotal/count(tip_all)\n",
+                    "fix             forcetip tip_all aveforce 0.0 0.0 ${Fatom}\n\n",
 
                     "##########################################################\n",
                     "#------------------------Compute-------------------------#\n",
@@ -376,37 +377,79 @@ class AFMSimulation(model_init.ModelInit):
                             1, self.ngroups[layer]+1) if system+n in self.group_def[i][0]]
                         f.write(
                             f"group {system}{n} type {' '.join(sub_group)}\n")
-            if lj_sheet:
-                f.writelines(["group mobile union tip_thermo sub_thermo\n",
-                          f"pair_style hybrid {self.params['sub']['pot_type']} {self.params['tip']['pot_type']} {(self.params['2D']['pot_type'] + ' ') * layer} lj/cut 8.0\n"])
-            else:
-                f.writelines(["group mobile union tip_thermo sub_thermo\n",
-                          f"pair_style hybrid {self.params['sub']['pot_type']} {self.params['tip']['pot_type']} {self.params['2D']['pot_type']} lj/cut 8.0\n"])
+            # --- Determine potential types and their counts ---
+            potential_counts = {}
+            potential_types = []
 
-            potentials = {}
-            t = 0
+            # Collect potential for sub and tip
+            for system in ['sub', 'tip']:
+                pot_type = self.params[system]['pot_type']
+                potential_types.append(pot_type)
+                potential_counts[pot_type] = potential_counts.get(pot_type, 0) + 1
+
+            # Collect potential for 2D material
+            pot_2d = self.params['2D']['pot_type']
+            if lj_sheet:
+                for _ in range(layer):
+                    potential_types.append(pot_2d)
+                potential_counts[pot_2d] = potential_counts.get(pot_2d, 0) + layer
+            else:
+                potential_types.append(pot_2d)
+                potential_counts[pot_2d] = potential_counts.get(pot_2d, 0) + 1
+
+            # --- Write pair_style hybrid command ---
+            f.write("group mobile union tip_thermo sub_thermo\n")
+            hybrid_style_parts = []
+            for pot, count in potential_counts.items():
+                hybrid_style_parts.extend([pot] * count)
+            hybrid_style_parts.append("lj/cut 8.0")
+            f.write(f"pair_style hybrid {' '.join(hybrid_style_parts)}\n")
+
+            # --- Write pair_coeff commands ---
+            potential_indices = {pot: 0 for pot in potential_counts}
+            
             for system in self.systems:
-                t += 1
+                pot_type = self.params[system]['pot_type']
+                
+                # Get the index string for the potential type
+                index_str = ""
+                if potential_counts[pot_type] > 1:
+                    potential_indices[pot_type] += 1
+                    index_str = f" {potential_indices[pot_type]}"
+
                 if system == '2D':
                     if lj_sheet:
                         for l in range(layer):
-                            potentials[l] = [
-                                self.group_def[i][3] if "2D_l" +
-                                str(l+1) in self.group_def[i][0] else "NULL"
-                                for i in range(1, self.ngroups[layer]+1)
+                            # Re-calculate index string for each layer if needed
+                            layer_index_str = ""
+                            if potential_counts[pot_type] > 1:
+                                layer_index_str = f" {potential_indices[pot_type]}"
+                                potential_indices[pot_type] += 1
+                            
+                            potentials = [
+                                self.group_def[i][3] if f"2D_l{l+1}" in self.group_def[i][0] else "NULL"
+                                for i in range(1, self.ngroups[layer] + 1)
                             ]
                             f.write(
-                                f"pair_coeff * * {self.params['2D']['pot_type']} {t+l} {self.potentials['2D']['path']} {'  '.join(potentials[l])} # interlayer '2D' Layer {l+1}\n")
+                                f"pair_coeff * * {pot_type}{layer_index_str} {self.potentials['2D']['path']} {' '.join(potentials)} # interlayer '2D' Layer {l+1}\n")
+                        # Decrement the index back to its state before the 2D layer loop
+                        if potential_counts[pot_type] > 1:
+                            potential_indices[pot_type] -= layer
                     else:
-                        potentials = [self.group_def[i][3] if "2D" in self.group_def[i][0] else "NULL"
-                                      for i in range(1, self.ngroups[layer]+1)]
+                        potentials = [
+                            self.group_def[i][3] if "2D" in self.group_def[i][0] else "NULL"
+                            for i in range(1, self.ngroups[layer] + 1)
+                        ]
                         f.write(
-                            f"pair_coeff * * {self.params['2D']['pot_type']} {t} {self.potentials['2D']['path']} {'  '.join(potentials)} # interlayer '2D'\n")
+                            f"pair_coeff * * {pot_type}{index_str} {self.potentials['2D']['path']} {' '.join(potentials)} # interlayer '2D'\n")
                 else:
-                    potentials[system] = [self.group_def[i][2] if system in self.group_def[i][0] else "NULL"
-                                          for i in range(1, self.ngroups[layer]+1)]
+                    potentials = [
+                        self.group_def[i][2] if system in self.group_def[i][0] else "NULL"
+                        for i in range(1, self.ngroups[layer] + 1)
+                    ]
                     f.write(
-                        f"pair_coeff * * {self.params[system]['pot_type']} {t} {self.potentials[system]['path']} {'  '.join(potentials[system])} # interlayer {system.capitalize()}\n")
+                        f"pair_coeff * * {pot_type}{index_str} {self.potentials[system]['path']} {' '.join(potentials)} # interlayer {system.capitalize()}\n")
+
 
             max_sigma = 0
             if lj_sheet:

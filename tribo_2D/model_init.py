@@ -612,8 +612,17 @@ class ModelInit:
 
         # Duplicate the sheet to match the specified simulation dimensions
         dim = utilities.get_model_dimensions(filename)
-        # self.shift_x = dim['xhi'] / 3
-        self.shift_y = dim['yhi'] / 3
+        
+        # Set shift values for stacking based on material type
+        material_name = self.params['2D']['mat']
+        if material_name.startswith('p-') or material_name == 'black_phosphorus':
+            # AB stacking for puckered/orthogonal structures
+            self.shift_x = dim['xhi'] / 2
+            self.shift_y = dim['yhi'] / 2
+        else:
+            # Default shift for other structures (e.g., hexagonal)
+            self.shift_x = 0
+            self.shift_y = dim['yhi'] / 3
 
         duplicate_a = round(x / dim['xhi'])
         duplicate_b = round(y / dim['yhi'])
@@ -761,6 +770,7 @@ class ModelInit:
 
         if self.params['2D']['stack_type'] == 'AA':
             self.shift_y = 0
+            self.shift_x = 0
             # y_shift = 0
             # x_shift = (self.dim['xhi'] - self.dim['xlo']) / 2
         # Compute x_shift for layer displacement (used for stacking)
@@ -772,14 +782,14 @@ class ModelInit:
                     f"read_data {filename}_1.lmp add append shift 0 0 {l*lat_c} group layer_{l+1}\n")
             # For sheetvsheet, displace layers 3 and 4 only
             lmp.commands_list([
-                f"displace_atoms layer_3 move 0 {self.shift_y} 0 units box\n",
-                f"displace_atoms layer_4 move 0 {self.shift_y} 0 units box\n",
+                f"displace_atoms layer_3 move {self.shift_x} {self.shift_y} 0 units box\n",
+                f"displace_atoms layer_4 move {self.shift_x} {self.shift_y} 0 units box\n",
             ])
         else:
             for l in range(1, layer):
                 lmp.commands_list([
                     f"read_data {filename}_1.lmp add append shift 0 0 {l*lat_c} group layer_{l+1}\n",
-                    f"displace_atoms layer_{l+1} move 0 -{self.shift_y*l} 0 units box\n",
+                    f"displace_atoms layer_{l+1} move {self.shift_x*l} {self.shift_y*l} 0 units box\n",
                 ])
 
         # Define atom type groups for each layer
@@ -806,7 +816,6 @@ class ModelInit:
         # Energy minimization and equilibration
         lmp.commands_list([
             f"include         {self.dir}/build/sheet_{layer}.in.settings\n\n",
-            "dump            sys all atom 1 equil.lammpstrj\n",
             "min_style       cg\n",
             "minimize        1.0e-4 1.0e-8 1000000 1000000\n\n",
             "timestep        0.001\n",
