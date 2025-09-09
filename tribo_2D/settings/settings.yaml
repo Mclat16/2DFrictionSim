@@ -45,7 +45,10 @@ potential:
 
 # Quenching parameters
 quench:
+  timestep: 0.002
   quench_slab_dims: [200, 200, 50] # Dimensions of the slab for quenching
-  quench_rate: 1e11                # Quench rate in K/s
+  quench_rate: 1e12               # Quench rate in K/s
   quench_target_temp: 300          # Target temperature for quenching
   quench_melt_temp: 2500           # Melting temperature for quenching
+  run_local: true               # Whether to run quenching locally (true/false)
+  n_procs: 4                     # Number of processors to use if not running locally

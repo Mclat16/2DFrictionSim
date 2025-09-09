@@ -488,39 +488,51 @@ class ModelInit:
                 )
 
                 # Prepare for melt-quench simulation
-                quench_rate = self.settings['quench']['quench_rate'] * 1e-12 / self.settings['quench']['timestep']
+                quench_rate = float(self.settings['quench']['quench_rate']) * 1e-12 / float(self.settings['quench']['timestep'])    
                 quench_nsteps = max((self.settings['quench']['quench_melt_temp'] - self.params['general']['temp']) * quench_rate, 0)
                 pot_file = f"{self.dir}/build/{system}.in.settings"
                 self._single_body_potential(pot_file, system)
 
                 # Initialize LAMMPS and run melt-quench-relax protocol
-                lmp = lammps()
-                lmp.commands_list(self.init())
-                lmp.commands_list([
-                    f"read_data      {slab_path}",
-                    f"include        {pot_file}",
-                    f"min_style      {self.settings['simulation']['min_style']}",
-                    self.settings['simulation']['minimization_command'],
-                    f"timestep       {self.settings['quench']['timestep']}",
-                    f"thermo         {self.settings['simulation']['thermo']}",
-                    "thermo_style   custom step temp pe ke etotal press vol",
-                    f"velocity       all create {self.settings['quench']['quench_melt_temp']} 1234579 rot yes dist gaussian",
-                    "run            0",
-                    # Melt and equilibrate at constant pressure (NPT)
-                    f"fix           melt all npt temp {self.settings['quench']['quench_melt_temp']} {self.settings['quench']['quench_melt_temp']} $(100.0*dt) iso 0.0 0.0 $(1000.0*dt)",
-                    "run            20000",
-                    "unfix          melt",
-                    # Quench at constant pressure (NPT)
-                    f"fix            quench all npt temp {self.settings['quench']['quench_melt_temp']} {self.params['general']['temp']} $(100.0*dt) iso 0.0 0.0 $(1000.0*dt)",
-                    f"run            {quench_nsteps}",
-                    "unfix          quench",
-                    # Final relaxation at target temperature
-                    f"fix            relax all npt temp {self.params['general']['temp']} {self.params['general']['temp']} $(100.0*dt) iso 0.0 0.0 $(1000.0*dt)",
-                    "run            10000",
-                    "unfix          relax",
-                    f"write_data     {am_filename}"
-                ])
-                lmp.close()
+                lmp_input = os.path.join(tempfile.gettempdir(), f"lmp_input_{system}.in")
+                with open(lmp_input, 'w', encoding="utf-8") as f:
+                    f.writelines(self.init(neigh=True))
+                    f.writelines([
+                        f"read_data      {slab_path}\n",
+                        f"include        {pot_file}\n",
+                        f"min_style      {self.settings['simulation']['min_style']}\n",
+                        self.settings['simulation']['minimization_command'],
+                        f"\ntimestep       {self.settings['quench']['timestep']}\n",
+                        f"thermo         100\n",
+                        "thermo_style   custom step temp pe ke etotal press vol\n",
+                        f"velocity       all create {self.settings['quench']['quench_melt_temp']} 1234579 rot yes dist gaussian\n",
+                        "run            0\n",
+                        # Melt and equilibrate at constant pressure (NPT)
+                        f"fix           melt all npt temp {self.settings['quench']['quench_melt_temp']} {self.settings['quench']['quench_melt_temp']} $(100.0*dt) iso 0.0 0.0 $(1000.0*dt)\n",
+                        "run            20000\n",
+                        "unfix          melt\n",
+                        # Quench at constant pressure (NPT)
+                        f"fix            quench all npt temp {self.settings['quench']['quench_melt_temp']} {self.params['general']['temp']} $(100.0*dt) iso 0.0 0.0 $(1000.0*dt)\n",
+                        f"run            {quench_nsteps}\n",
+                        "unfix          quench\n",
+                        # Final relaxation at target temperature
+                        f"fix            relax all npt temp {self.params['general']['temp']} {self.params['general']['temp']} $(100.0*dt) iso 0.0 0.0 $(1000.0*dt)\n",
+                        "run            10000\n",
+                        "unfix          relax\n",
+                        f"write_data     {am_filename}"
+                    ])
+                if self.settings['quench']['run_local']:
+                    subprocess.run(f"mpiexec -np {self.settings['quench']['n_procs']} lmp -in {lmp_input}", shell=True, check=True)
+                else:
+                    local_lmp_input = os.path.join(self.dir, f"make_amorphous_{system}.in")
+                    with open(local_lmp_input, 'w', encoding="utf-8") as f_out, open(lmp_input, 'r', encoding="utf-8") as f_in:
+                        f_out.write(f_in.read())
+                    
+                    logging.info(f"LAMMPS input file for amorphous structure generation has been saved to: {local_lmp_input}")
+                    logging.info("Please run the following command to generate the amorphous structure:")
+                    logging.info(f"mpiexec -np {self.settings['quench']['n_procs']} lmp -in {local_lmp_input}")
+                    logging.info("After the simulation is complete, please rerun the program.")
+                    exit()
             except Exception as e:
                 logging.exception(f"Failed to generate amorphous structure for {system}: {e}")
                 raise
@@ -940,7 +952,7 @@ class ModelInit:
     def init(self,neigh=False):
         """Returns a list of LAMMPS commands for system initialization."""
         commands = [
-            "# LAMMPS input script for system build with input of substrate, graphene sheet and AFM tip\n\n",
+            "# LAMMPS input script\n\n",
             "clear\n\n",
             "units           metal\n",
             "atom_style      atomic\n",
@@ -948,8 +960,8 @@ class ModelInit:
         ]
         if neigh:
             commands.extend([
-                f"neighbor        {self.settings['simulation']['neighbor_list']}\n",
-                f"{self.settings['simulation']['neighbor_modify']}\n",
+                f"neighbor        {self.settings['simulation']['neighbor_list']} bin\n",
+                f"{self.settings['simulation']['neigh_modify_command']}\n",
             ])
             
         return commands

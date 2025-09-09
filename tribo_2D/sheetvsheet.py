@@ -4,7 +4,6 @@ import logging
 import tempfile
 
 from tribo_2D import model_init, utilities
-from tribo_2D.settings import file as settings_file
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
