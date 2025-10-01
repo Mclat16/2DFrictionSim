@@ -395,9 +395,10 @@ class ModelInit:
             y = self.params['2D']['y']
             filename = f"{self.dir}/build/{self.params['2D']['mat']}_1.lmp"
 
-            # Check compatibility and renumber atom types if necessary
-            multiplier = utilities.check_potential_cif_compatibility(
-                self.params['2D']['cif_path'], self.params['2D']['pot_path'])
+            # Determine atom type multiplier based on potential compatibility
+            multiplier = 1 if self.params['2D']['pot_type'] in ['rebo', 'rebomos', 'airebo', 'meam', 'reaxff'] \
+                else utilities.check_potential_cif_compatibility(
+                    self.params['2D']['cif_path'], self.params['2D']['pot_path'])
             typecount = sum(self.potentials['2D']['count'].values())
             Path(filename).unlink(missing_ok=True)
 
@@ -513,7 +514,7 @@ class ModelInit:
                         "unfix          melt\n",
                         # Quench at constant pressure (NPT)
                         f"fix            quench all npt temp {self.settings['quench']['quench_melt_temp']} {self.params['general']['temp']} $(100.0*dt) iso 0.0 0.0 $(1000.0*dt)\n",
-                        f"run            {quench_nsteps}\n",
+                        f"run            {int(quench_nsteps)}\n",
                         "unfix          quench\n",
                         # Final relaxation at target temperature
                         f"fix            relax all npt temp {self.params['general']['temp']} {self.params['general']['temp']} $(100.0*dt) iso 0.0 0.0 $(1000.0*dt)\n",
@@ -691,6 +692,7 @@ class ModelInit:
         """
         lmp = lammps(cmdargs=["-log", "none", "-screen", "none",  "-nocite"])
         try:
+            lmp.commands_list(self.init(neigh=True))
             lmp.command(f"read_data       {filename}")
 
             # Set atomic masses
@@ -706,7 +708,6 @@ class ModelInit:
                         i += 1
                 mass = data.atomic_masses[data.atomic_numbers[element]]
                 lmp.command(f"mass {i} {mass}")
-
             # Define variables to calculate the displacement needed for centering
             lmp.commands_list([
                 f"pair_style  {self.params[system]['pot_type']}",

@@ -1,7 +1,7 @@
 # by Jin-Wu Jiang, jwjiang5918@hotmail.com, 05/04/15/Sun
 
 # (1). SW parameters for MoS2, used by LAMMPS, derived from VFF model analytically.
-
+# This potential uses sw/mod
 # The Stillinger-Weber parameters in metal units, for MoS2.
 # these entries are in LAMMPS "metal" units:
 #   epsilon = eV; sigma = Angstroms

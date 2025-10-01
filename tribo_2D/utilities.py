@@ -118,6 +118,10 @@ def count_atomtypes(potential_filepath, elements):
         count of unique atom types for that element (e.g., {'C': 2} for C1, C2).
     """
     elem_type = {el: 0 for el in elements}
+    if potential_filepath.lower().endswith(('.rebo', '.rebomos', '.airebo', '.meam', '.reaxff')):
+        elem_type = {el: 1 for el in elements}
+        return elem_type
+    
     pattern = re.compile(r'([A-Za-z]+)(\d*)')
 
     with open(potential_filepath, 'r', encoding="utf-8") as f:

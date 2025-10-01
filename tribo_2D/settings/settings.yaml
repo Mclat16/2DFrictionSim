@@ -51,4 +51,12 @@ quench:
   quench_target_temp: 300          # Target temperature for quenching
   quench_melt_temp: 2500           # Melting temperature for quenching
   run_local: true               # Whether to run quenching locally (true/false)
-  n_procs: 4                     # Number of processors to use if not running locally
+  n_procs: 16                     # Number of processors to use if not running locally
+
+# AiiDA settings
+aiida:
+  lammps_code_label: 'lammps@my_hpc'
+  postprocess_code_label: 'python@my_hpc'
+  postprocess_script_path: '/path/to/your/read_data.py'
+  num_cpus: 32
+  walltime_seconds: 72000 # 20 hours
