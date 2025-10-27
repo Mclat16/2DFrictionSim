@@ -15,7 +15,7 @@ import shutil
 import numpy as np
 import yaml
 
-from tribo_2D.Potentials import lj_params as lj
+from tribo_2D.Potentials import UFF_params as lj
 
 
 def read_yaml(filepath):
@@ -225,7 +225,6 @@ def read_config(filepath):
     """
     config = configparser.ConfigParser()
     config.read(filepath)
-
     config = _remove_inline_comments(config)
 
     params = {}
@@ -248,7 +247,6 @@ def read_config(filepath):
                 params[section][key] = value
     return params
 
-
 def atomic2molecular(filepath):
     """Converts a LAMMPS data file from atomic to molecular format in-place.
 
@@ -268,8 +266,6 @@ def atomic2molecular(filepath):
     for line in lines:
         line = line.strip()
         # Stop processing if another section (e.g., Velocities) is reached
-        if atoms_section and not line.split():
-            atoms_section = False
 
         if line.startswith("Velocities"):
             break
@@ -283,11 +279,11 @@ def atomic2molecular(filepath):
         # Modify atom data lines to add molecule ID and charge/dipole fields
         if atoms_section and line:
             parts = line.split()
-            if len(parts) >= 4:  # Ensure it's a valid atom line
+            if len(parts) >= 4 and all(c in '0123456789.-+eE' for c in parts[0]):  # Ensure it's a valid atom line
                 atom_id = parts[0]
                 atom_type = parts[1]
                 x, y, z = parts[2:5]
-
+                
                 # New format: atom-ID molecule-ID atom-type x y z [charge] [dipole]
                 new_line = f"{atom_id} 0 {atom_type} {x} {y} {z} 0 0 0"
                 modified_lines.append(new_line)

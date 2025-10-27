@@ -15,7 +15,7 @@ thermostat:
   langevin_boundaries:
     tip:
       fix: [3, 0]
-      thermo: [5, 3]
+      thermo: [6, 3]
     sub:
       fix: [0, 0.3]
       thermo: [0.3, 0.6]

@@ -213,7 +213,7 @@ class AFMSimulation(model_init.ModelInit):
             filename = f"{self.sheet_dir[layer]}/lammps/system.lmp"
 
             # Find gap between the 2D material and the substrate.
-            gap = self.afm_potentials_setup(layer)
+            gap = self._generate_potentials_file(layer, is_slide_script=False)
             height_2d = self.params['sub']['thickness'] + 0.5 + gap
             
             with open(filename, 'w', encoding="utf-8") as f_out:
@@ -274,7 +274,6 @@ class AFMSimulation(model_init.ModelInit):
                     "variable        num_floads equal 100\n",
                     "variable        r equal 0.0\n",
                     "variable        fincr equal (${find}-${f})/${num_floads}\n",
-                    "thermo_modify   lost ignore flush yes\n\n",
                     "# Apply pressure to the tip.\n",
                     "variable i loop ${num_floads}\n",
                     "label loop_load\n\n",
@@ -303,7 +302,7 @@ class AFMSimulation(model_init.ModelInit):
                     "jump SELF disp\n\n",
                     "variable r equal ${disp_h}-${disp_l}\n\n",
                     "# Check if displacement has stabilized.\n",
-                    "if '${r} < 0.2' then 'jump SELF loop_end' else 'jump SELF check_r'\n\n",
+                    "if '${r} < 0.1' then 'jump SELF loop_end' else 'jump SELF check_r'\n\n",
                     "label loop_end\n\n",
                     f"write_data {self.sheet_dir[layer]}/data/load_$(v_find)N.data\n",
                     "next find\n",
@@ -324,6 +323,7 @@ class AFMSimulation(model_init.ModelInit):
         tip_fix_group = "tip_all" if self.settings['geometry']['rigid_tip'] else "tip_fix"
 
         for layer in self.params['2D']['layers']:
+            self._generate_potentials_file(layer, is_slide_script=True)
             filename = f"{self.sheet_dir[layer]}/lammps/slide_{self.params['tip']['s']}ms.lmp"
             with open(filename, 'w', encoding="utf-8") as f_out:
                 f_out.writelines([
@@ -346,18 +346,24 @@ class AFMSimulation(model_init.ModelInit):
 
                 f_out.writelines([
                     f"read_data       {self.sheet_dir[layer]}/data/load_$(v_find)N.data extra/atom/types {extra_atom_types}\n\n",
-                    f"include         {self.sheet_dir[layer]}/lammps/system.in.settings\n\n",
-                    "balance 1.0 rcb\n",
+                    f"include         {self.sheet_dir[layer]}/lammps/slide.in.settings\n\n",
                 ])
-
+                if drive_method == 'virtual_atom':
+                    f_out.writelines([
+                        "# Create a virtual atom and assign it to a group.\n",
+                        f"create_atoms    {self.ngroups[layer]+1} single 0 0 0 units box\n",
+                        f"group           virtual type {self.ngroups[layer]+1}\n",
+                    ])
+                    
                 if self.settings['output']['dump']['slide']:
                     f_out.writelines([
                         "# Create visualization files.\n",
-                        f"dump            sys all atom {self.settings['output']['dump_frequency']['slide']} ./{self.dir}/visuals/system_{layer}.lammpstrj\n\n",
+                        f"dump            sys all atom {self.settings['output']['dump_frequency']['slide']} ./{self.dir}/visuals/slide_{self.params['tip']['s']}ms_l{layer}.lammpstrj\n\n",
                         "dump_modify sys append yes\n",
                     ])
 
                 f_out.writelines([
+                    "balance 1.0 rcb\n",
                     "# Apply constraints.\n",
                     "fix             sub_fix sub_fix setforce 0.0 0.0 0.0 \n",
                     f"fix             tip_f {tip_fix_group} rigid/nve single force * on on on torque * off off off\n\n",
@@ -409,22 +415,20 @@ class AFMSimulation(model_init.ModelInit):
                         f"velocity        {tip_fix_group} set $(v_spring_x*{tipps}) $(v_spring_y*{tipps}) 0.0\n\n",
                     ])
                 elif drive_method == 'virtual_atom':
-                    virtual_atom_type = self.ngroups[layer] + 1
                     virtual_offset = self.params['tip']['r'] * 3 / 2
                     f_out.writelines([
                         "# Create a virtual atom to drag the tip.\n",
                         f"variable virtual_x equal $(v_comx_tip)+{virtual_offset}*$(v_spring_x)\n",
                         f"variable virtual_y equal $(v_comy_tip)+{virtual_offset}*$(v_spring_y)\n",
                         f"variable virtual_z equal $(v_comz_tip)\n",
-                        f"create_atoms    {virtual_atom_type} single $(v_virtual_x) $(v_virtual_y) $(v_virtual_z) group virtual\n",
-                        "set             group virtual mass 1.0\n",
-                        f"pair_coeff      {virtual_atom_type} * lj/cut 0.0 0.0\n",
+                        f"displace_atoms virtual move v_virtual_x v_virtual_y v_virtual_z units box\n",
+                        f"velocity        virtual set 0.0 0.0 0.0\n",
+                        f"fix             spr {tip_fix_group} spring couple virtual {spring_ev} 0.0 0.0 NULL {virtual_offset} \n\n",
                         f"fix             move_virtual virtual move linear $(v_spring_x*{tipps}) $(v_spring_y*{tipps}) 0.0\n",
-                        f"fix             spr {tip_fix_group} spring couple virtual {spring_ev} {spring_ev} 0.0 0.0\n\n",
                     ])
 
                 f_out.writelines([
-                    "run 200000\n\n",
+                    f"run {self.settings['simulation']['slide_run_steps']}\n\n",
 
                     f"if '$(v_a) == {self.params['general']['scan_angle'][1]}' then &\n",
                     "'next a' & \n",
@@ -511,7 +515,7 @@ class AFMSimulation(model_init.ModelInit):
         lmp.command(f"write_data {self.dir}/build/{system}.lmp")
         lmp.close
 
-    def afm_potentials_setup(self, layer):
+    def _generate_potentials_file(self, layer, is_slide_script):
         """Writes the potential settings file for the AFM simulation.
 
         This method configures hybrid potentials and defines pair coefficients
@@ -521,6 +525,8 @@ class AFMSimulation(model_init.ModelInit):
 
         Args:
             layer (int): The number of layers in the 2D material.
+            is_slide_script (bool): Flag to indicate if the settings are for the slide script.
+
 
         Returns:
             float: The maximum sigma value from Lennard-Jones interactions
@@ -528,8 +534,14 @@ class AFMSimulation(model_init.ModelInit):
                    calculating the initial gap.
         """
         lj_sheet = self.is_sheet_lj()
-        filename = f"{self.dir}/l_{layer}/lammps/system.in.settings"
+        if is_slide_script:
+            filename = f"{self.dir}/l_{layer}/lammps/slide.in.settings"
+        else:
+            filename = f"{self.dir}/l_{layer}/lammps/system.in.settings"
+
         with open(filename, 'w', encoding="utf-8") as f_out:
+            self.elemgroup = {}
+            self.group_def = {}
             atype = 1
 
             # Define element groups for all systems.
@@ -583,6 +595,13 @@ class AFMSimulation(model_init.ModelInit):
 
             # Write pair_coeff commands for intra-system potentials.
             potential_indices = {pot: 0 for pot in potential_counts}
+
+            drive_method = self.settings['simulation'].get('drive_method', 'smd')
+            num_atom_types = self.ngroups[layer]
+            if is_slide_script and drive_method == 'virtual_atom':
+                num_atom_types += 1
+                self.group_def[num_atom_types] = ['virtual', str(num_atom_types), 'NULL', 'NULL']
+
             for system in self.systems:
                 pot_type = self.params[system]['pot_type']
                 
@@ -599,8 +618,8 @@ class AFMSimulation(model_init.ModelInit):
                                 layer_index_str = f" {potential_indices[pot_type] + l}"
                             
                             potentials = [
-                                self.group_def[i][3] if f"2D_l{l+1}" in self.group_def[i][0] else "NULL"
-                                for i in range(1, self.ngroups[layer] + 1)
+                                self.group_def.get(i, [None]*4)[3] if f"2D_l{l+1}" in self.group_def.get(i, [""])[0] else "NULL"
+                                for i in range(1, num_atom_types + 1)
                             ]
                             f_out.write(
                                 f"pair_coeff * * {pot_type}{layer_index_str} {self.potentials['2D']['path']} {' '.join(potentials)} # 2D Layer {l+1}\n")
@@ -608,15 +627,15 @@ class AFMSimulation(model_init.ModelInit):
                             potential_indices[pot_type] += layer -1
                     else:
                         potentials = [
-                            self.group_def[i][3] if "2D" in self.group_def[i][0] else "NULL"
-                            for i in range(1, self.ngroups[layer] + 1)
+                            self.group_def.get(i, [None]*4)[3] if "2D" in self.group_def.get(i, [""])[0] else "NULL"
+                            for i in range(1, num_atom_types + 1)
                         ]
                         f_out.write(
                             f"pair_coeff * * {pot_type}{index_str} {self.potentials['2D']['path']} {' '.join(potentials)} # 2D\n")
                 else:
                     potentials = [
-                        self.group_def[i][2] if system in self.group_def[i][0] else "NULL"
-                        for i in range(1, self.ngroups[layer] + 1)
+                        self.group_def.get(i, [None]*3)[2] if system in self.group_def.get(i, [""])[0] else "NULL"
+                        for i in range(1, num_atom_types + 1)
                     ]
                     f_out.write(
                         f"pair_coeff * * {pot_type}{index_str} {self.potentials[system]['path']} {' '.join(potentials)} # {system.capitalize()}\n")
@@ -650,7 +669,9 @@ class AFMSimulation(model_init.ModelInit):
     
                     f_out.write(
                         f"pair_coeff {sub_types} {tip_types} lj/cut {e} {sigma} \n")
-    
+            if is_slide_script and drive_method == 'virtual_atom':
+                f_out.writelines([f"mass {num_atom_types} 1.0\n",
+                                 f"pair_coeff * {num_atom_types} lj/cut 1e-100 1e-100\n"])
         return max_sigma
 
     def __single_body_3layer(self, filename, system):

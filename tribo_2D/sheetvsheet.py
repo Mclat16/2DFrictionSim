@@ -43,8 +43,8 @@ class SheetvsheetSimulation(model_init.ModelInit):
             config = utilities.read_config(self.input_file)
             materials = self._get_materials(config)
 
-            with open(self.input_file, "r", encoding="utf-8") as f:
-                base_config_str = f.read()
+            with open(self.input_file, "r", encoding="utf-8") as config_file:
+                base_config_str = config_file.read()
         except FileNotFoundError:
             logging.error(f"Input file not found: {self.input_file}")
             return
@@ -55,11 +55,12 @@ class SheetvsheetSimulation(model_init.ModelInit):
         if materials:
             for mat in materials:
                 try:
+                    print(f"Setting up simulation for material {mat}...")
                     mat_config_str = base_config_str.replace("{mat}", mat)
                     self._run_simulations_for_sizes(config, mat_config_str)
                 except Exception as e:
-                    logging.error(f"Simulation failed for material {mat}: {e}")
-                    continue
+                    logging.error(f"Simulation setup failed for material {mat}: {e}")
+                    continue 
         else:
             self._run_simulations_for_sizes(config, base_config_str)
 
@@ -78,8 +79,8 @@ class SheetvsheetSimulation(model_init.ModelInit):
         if isinstance(materials_list, list):
             return materials_list
         try:
-            with open(materials_list, "r", encoding="utf-8") as f:
-                return [line.strip() for line in f]
+            with open(materials_list, "r", encoding="utf-8") as materials_file:
+                return [line.strip() for line in materials_file]
         except FileNotFoundError:
             logging.warning(f"Materials list file not found: {materials_list}")
             return []
@@ -101,7 +102,6 @@ class SheetvsheetSimulation(model_init.ModelInit):
 
         if not isinstance(x_sizes, list):
             # If no sizes are specified, run a single simulation.
-            temp_config_name = None
             try:
                 with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".ini", encoding="utf-8") as temp_config_file:
                     temp_config_file.write(config_str)
@@ -111,7 +111,7 @@ class SheetvsheetSimulation(model_init.ModelInit):
                 logging.exception(f"Single simulation run failed")
                 raise
             finally:
-                if temp_config_name and os.path.exists(temp_config_name):
+                if os.path.exists(temp_config_name):
                     os.remove(temp_config_name)
             return
 
@@ -131,7 +131,7 @@ class SheetvsheetSimulation(model_init.ModelInit):
                 self.system_setup(temp_config_name)
             except Exception:
                 logging.exception(f"Simulation for size {x_val}x{y_val} failed")
-                raise  # Continue with the next size
+                raise  # Re-raise to stop the process
             finally:
                 if temp_config_name and os.path.exists(temp_config_name):
                     os.remove(temp_config_name)
@@ -160,7 +160,7 @@ class SheetvsheetSimulation(model_init.ModelInit):
         - Defining output computes for friction and other metrics.
         """
         settings_filename = f"{self.dir}/lammps/system.in.settings"
-        super().__sheet_potential(settings_filename, 4, True)
+        super().sheet_potential(settings_filename, 4, True)
 
         filename = f"{self.dir}/lammps/slide.lmp"
 
@@ -172,17 +172,16 @@ class SheetvsheetSimulation(model_init.ModelInit):
                 f"variable a index 0 {' '.join(str(x) for x in self.scan_angle)} 0\n",
                 "label angle_loop\n",
             ])
-                
-            f_out.writelines(self.init(neigh=True))
+            utilities.atomic2molecular(f"{self.dir}/build/{self.params['2D']['mat']}_4.lmp")
+            f_out.writelines(self.init(neigh=True, atom_style='molecular'))
             f_out.writelines([
                 "comm_style       tiled\n",
-                "balance 1.0 rcb\n",
                 "#------------------Create Geometry------------------------\n",
                 "#----------------- Define the simulation box -------------\n",
                 f"region          box block {self.dim['xlo']} {self.dim['xhi']} {self.dim['ylo']} {self.dim['yhi']} -40.0 40.0 units box\n",
                 f"create_box      {self.ngroups[4]} box bond/types 1 extra/bond/per/atom 100\n\n",
                 f"read_data       {self.dir}/build/{self.params['2D']['mat']}_4.lmp extra/bond/per/atom 100 add append group bot\n\n",
-
+                "balance 1.0 rcb\n",
                 "#----------------- Create visualisation files ------------\n\n"
                 f"include {settings_filename}\n",
                 "# Create bonds\n",
@@ -236,17 +235,17 @@ class SheetvsheetSimulation(model_init.ModelInit):
                 
                 f"if '$(v_a) != 0' then &\n",
                 "'variable omega equal v_a/10000' &\n",
-                "'fix rot layer_4 move rotate ${comx_top} ${comy_top} ${comz_top} 0 0 1 ${omega}' &\n\n",
-                "'run             10000' &\n\n",
+                "'fix rot layer_4 move rotate ${comx_top} ${comy_top} ${comz_top} 0 0 1 ${omega}' &\n",
+                "'run             10000' &\n",
                 "'unfix rot'\n\n",
 
                 "unfix fstage_top\n",
 
-                "fix             fstage_top layer_4 rigid single force * off off on torque * off off off\n\n",
+                "fix             fstage_top layer_4 rigid single force * off off off torque * off off off\n\n",
 
-                "variable        Ftotal          equal -v_find/1.602176565\n",
-                f"variable Fatom equal v_Ftotal/(count(layer_4)\n",
-                "fix force layer_4 aveforce 0.0 0.0 ${Fatom}\n\n",
+                "variable        f          equal -v_find/1.602176565\n",
+                "variable n equal v_f/(count(layer_4))\n",
+                "fix force layer_4 aveforce 0.0 0.0 $n\n\n",
 
                 "run             10000\n\n",
 
@@ -255,9 +254,9 @@ class SheetvsheetSimulation(model_init.ModelInit):
                 "variable        fz   equal  f_force[3]*1.602176565\n\n",
 
                 "#----------------- Output values -------------------------\n",
-                f"fix             fc_ave all ave/time 1 1000 {self.settings['output']['results_frequency']} v_fx v_fy v_fz v_comx_ctop v_comy_ctop v_comz_ctop v_comx_cbot v_comy_cbot v_comz_cbot file ./{self.dir}/results/fc_ave_slide_$(v_find)nN_$(v_a)angle_{self.params['tip']['s']}ms\n\n",
+                f"fix             fc_ave all ave/time 1 1000 {self.settings['output']['results_frequency']} v_fx v_fy v_fz v_comx_ctop v_comy_ctop v_comz_ctop v_comx_cbot v_comy_cbot v_comz_cbot file ./{self.dir}/results/fc_ave_slide_$(v_find)nN_$(v_a)angle_{self.params['general']['scan_speed']}ms\n\n",
 
-                f"velocity        layer_4 set 0.0 {self.params['general']['scan_speed']} 0.0 0.0 \n",
+                f"velocity        layer_4 set {self.params['general']['scan_speed']/100} 0.0 0.0 \n",
                 f"run             {self.settings['simulation']['slide_run_steps']}\n\n",
 
                 f"if '$(v_a) == {self.params['general']['scan_angle'][1]}' then &\n",

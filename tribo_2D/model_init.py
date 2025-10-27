@@ -199,15 +199,14 @@ class ModelInit:
             f"K{self.params['general']['temp']}"
         )
         self._create_directories(["lammps", "visuals", "results", "build", "potentials"])
-
         self.scan_angle = np.arange(
             self.params['general']['scan_angle'][0],
             self.params['general']['scan_angle'][1] + 1,
             self.params['general']['scan_angle'][2]
         )
 
-        self.ngroups[4] = self.data['2D']['natype'] * 4
         self.init_sheet(sheetvsheet=True)
+        self.ngroups[4] = self.data['2D']['natype'] * 4
 
     def setup_sheet_part(self):
         """Sets up the environment for a single 2D sheet."""
@@ -253,7 +252,7 @@ class ModelInit:
         self._initialize_component('2D')
         num_layers = [4] if sheetvsheet else self.params['2D']['layers']
         
-        for layer in range(1, max(num_layers) + 1):
+        for layer in num_layers:
             self.sheet_dir[layer] = self.dir / f"l_{layer}"
             if layer > 1:
                 self.stacking(layer, sheetvsheet)
@@ -559,7 +558,7 @@ class ModelInit:
             - Creates a new LAMMPS data file for the multi-layer structure.
             - Modifies `self.shift_x` and `self.shift_y` if they are not already set.
         """
-        self._sheet_potential(
+        self.sheet_potential(
             f"{self.dir}/build/sheet_{layer}.in.settings",
             layer,
             sheetvsheet=sheetvsheet
@@ -731,7 +730,7 @@ class ModelInit:
         finally:
             lmp.close()
 
-    def _sheet_potential(self, filename, layer, sheetvsheet=False):
+    def sheet_potential(self, filename, layer, sheetvsheet=False):
         """Writes the LAMMPS potential settings for a multi-layer 2D sheet.
 
         This method defines element groups, atomic masses, and pair potentials
@@ -951,14 +950,14 @@ class ModelInit:
             return None
         return None
     
-    def init(self,neigh=False):
+    def init(self,neigh=False, atom_style='atomic'):
         """Returns a list of LAMMPS commands for system initialization."""
         commands = [
             "# LAMMPS input script\n\n",
             "clear\n\n",
             "units           metal\n",
-            "atom_style      atomic\n",
-            "boundary   	 p p p\n",
+            f"atom_style      {atom_style}\n",
+            "boundary   	p p p\n",
         ]
         if neigh:
             commands.extend([
