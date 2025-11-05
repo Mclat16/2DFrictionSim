@@ -247,7 +247,7 @@ class AFMSimulation(model_init.ModelInit):
                     f"{self.settings['simulation']['minimization_command']}\n",
                     f"timestep       {self.settings['simulation']['timestep']}\n",
                     f"thermo         {self.settings['simulation']['thermo']}\n",
-                    "# Apply thermostat.\n",
+                    "# Apply thermostat \n",
                     f"group           fixset union sub_fix {tip_fix_group}\n",
                     "group           system subtract all fixset\n\n",
                     f"velocity        system create {self.params['general']['temp']} 492847948\n\n",
@@ -409,11 +409,13 @@ class AFMSimulation(model_init.ModelInit):
                         "# Add lateral harmonic spring to pull the tip.\n",
                         f"fix             spr tip_fix smd cvel {spring_ev} {tipps} tether $(v_spring_x) $(v_spring_y) NULL 0.0\n\n",
                     ])
+                    
                 elif drive_method == 'fix_move':
                     f_out.writelines([
                         "# Apply velocity to the tip to induce sliding.\n",
                         f"velocity        {tip_fix_group} set $(v_spring_x*{tipps}) $(v_spring_y*{tipps}) 0.0\n\n",
                     ])
+
                 elif drive_method == 'virtual_atom':
                     virtual_offset = self.params['tip']['r'] * 3 / 2
                     f_out.writelines([
