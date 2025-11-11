@@ -171,15 +171,29 @@ class ModelInit:
             (self.sheet_dir[layer] / "data").mkdir(parents=True, exist_ok=True)
             (self.sheet_dir[layer] / "lammps").mkdir(parents=True, exist_ok=True)
 
-        self.scan_angle = np.arange(
-            self.params['general']['scan_angle'][0],
-            self.params['general']['scan_angle'][1] + 1,
-            self.params['general']['scan_angle'][2]
-        )
+        scan_angle_params = self.params['general'].get('scan_angle')
+
+        if scan_angle_params is not None:
+            if isinstance(scan_angle_params, (list, tuple)):
+                if len(scan_angle_params) == 1:
+                    self.scan_angle = np.array([scan_angle_params[0]])
+                elif len(scan_angle_params) == 4:
+                    self.scan_angle = np.arange(
+                        scan_angle_params[0],
+                        scan_angle_params[1] + 1,
+                        scan_angle_params[2]
+                    )
+                else:
+                    raise ValueError(f"scan_angle must have 1 or 4 values, but got {len(scan_angle_params)}")
+            else:
+                # Handle case where it's a single number, not in a list
+                self.scan_angle = np.array([scan_angle_params])
+        else:
+            self.scan_angle = None  # Default to None if not provided
+
         self.init_sheet()
         self._initialize_component('sub')
         self._initialize_component('tip')
-
 
         self.systems = ['sub', 'tip', '2D']
         multiplier = 3 if self.settings['thermostat']['type'] == 'langevin' else 1
@@ -199,11 +213,25 @@ class ModelInit:
             f"K{self.params['general']['temp']}"
         )
         self._create_directories(["lammps", "visuals", "results", "build", "potentials"])
-        self.scan_angle = np.arange(
-            self.params['general']['scan_angle'][0],
-            self.params['general']['scan_angle'][1] + 1,
-            self.params['general']['scan_angle'][2]
-        )
+        scan_angle_params = self.params['general'].get('scan_angle')
+        if scan_angle_params is not None:
+            if isinstance(scan_angle_params, (list, tuple)):
+                if len(scan_angle_params) == 1:
+                    self.scan_angle = scan_angle_params[0]
+                elif len(scan_angle_params) == 4:
+                    self.scan_angle = np.arange(
+                        scan_angle_params[0],
+                        scan_angle_params[1] + 1,
+                        scan_angle_params[2]
+                    )
+                else:
+                    raise ValueError(f"scan_angle must have 1 or 4 values, but got {len(scan_angle_params)}")
+            else:
+                # Handle case where it's a single number, not in a list
+                self.scan_angle = scan_angle_params
+        else:
+            self.scan_angle = None  # Default to None if not provided
+
 
         self.init_sheet(sheetvsheet=True)
         self.ngroups[4] = self.data['2D']['natype'] * 4
@@ -558,11 +586,6 @@ class ModelInit:
             - Creates a new LAMMPS data file for the multi-layer structure.
             - Modifies `self.shift_x` and `self.shift_y` if they are not already set.
         """
-        self.sheet_potential(
-            f"{self.dir}/build/sheet_{layer}.in.settings",
-            layer,
-            sheetvsheet=sheetvsheet
-        )
 
         filename = f"{self.dir}/build/{self.params['2D']['mat']}"
         lmp = lammps(cmdargs=['-log', 'none', '-screen', 'none',  '-nocite'])
@@ -613,24 +636,34 @@ class ModelInit:
                             "group 2Dtype delete"
                         ])
                 i += count
-
-            # Minimize energy and extract interlayer distance
+            self.sheet_potential(
+                f"{self.dir}/build/sheet_{layer}.in.settings",
+                layer,
+                sheetvsheet=sheetvsheet
+            )
             lmp.commands_list([
                 f"include         {self.dir}/build/sheet_{layer}.in.settings",
-                f"min_style       {self.settings['simulation']['min_style']}",
-                self.settings['simulation']['minimization_command'],
-                f"timestep        {self.settings['simulation']['timestep']}",
-                "compute l_1 layer_1 com",
-                "compute l_2 layer_2 com",
-                "variable comz_1 equal c_l_1[3]",
-                "variable comz_2 equal c_l_2[3]",
-                "run 0",
-                f"write_data  {filename}_{layer}.lmp"
+                "run 0"
             ])
 
-            com_l1 = lmp.extract_variable('comz_1', None, 0)
-            com_l2 = lmp.extract_variable('comz_2', None, 0)
-            lat_c = com_l2 - com_l1
+            # Minimize energy and extract interlayer distance
+            if layer == 2:
+                lmp.commands_list([
+                    f"min_style       {self.settings['simulation']['min_style']}",
+                    self.settings['simulation']['minimization_command'],
+                    f"timestep        {self.settings['simulation']['timestep']}",
+                    "compute l_1 layer_1 com",
+                    "compute l_2 layer_2 com",
+                    "variable comz_1 equal c_l_1[3]",
+                    "variable comz_2 equal c_l_2[3]",
+                    "run 0"
+                ])
+                com_l1 = lmp.extract_variable('comz_1', None, 0)
+                com_l2 = lmp.extract_variable('comz_2', None, 0)
+                lat_c = com_l2 - com_l1
+
+            lmp.command(f"write_data  {filename}_{layer}.lmp")
+
         except Exception as e:
             logging.exception(f"LAMMPS simulation for stacking failed: {e}")
             raise
@@ -730,7 +763,7 @@ class ModelInit:
         finally:
             lmp.close()
 
-    def sheet_potential(self, filename, layer, sheetvsheet=False):
+    def sheet_potential(self, filename, layer, sheetvsheet=False, virtual = False):
         """Writes the LAMMPS potential settings for a multi-layer 2D sheet.
 
         This method defines element groups, atomic masses, and pair potentials
@@ -744,10 +777,9 @@ class ModelInit:
                 sheet-vs-sheet models by setting near-zero energy for specific
                 layer pairs.
         """
-        with open(filename, 'w') as f:
+        with open(filename, 'w', encoding="utf-8") as f:
             self.elemgroup['2D'] = {}
             self.group_def = {}
-            potentials = {}
             atype = 1
 
             # Define element groups and write atomic masses
@@ -757,22 +789,28 @@ class ModelInit:
 
             # Define LAMMPS groups for each layer
             for l in range(layer):
-                layer_g = [
+                layer_groups = [
                     self.group_def[i][1]
                     for i in range(1, self.data['2D']['natype'] * layer + 1)
                     if f"2D_l{l + 1}" in self.group_def[i][0]
                 ]
-                f.write(f"group layer_{l+1} type {' '.join(layer_g)}\n")
-
+                f.write(f"group layer_{l+1} type {' '.join(layer_groups)}\n")
+            
+            potential_counts = {}
+            num_atom_types = self.data['2D']['natype'] * layer
+            if virtual:
+                num_atom_types += 1
+                self.group_def[num_atom_types] = ['virtual', str(num_atom_types), 'NULL', 'NULL']                
+            
             # Set up pair style and coefficients
             if self.is_sheet_lj():
                 f.write(f"pair_style hybrid {(self.params['2D']['pot_type'] + ' ') * layer} lj/cut 11.0\n")
                 for l in range(layer):
-                    potentials[l] = [
+                    potential_counts[l] = [
                         self.group_def[i][3] if f"2D_l{l + 1}" in self.group_def[i][0] else "NULL"
-                        for i in range(1, self.data['2D']['natype'] * layer + 1)
+                        for i in range(1, num_atom_types + 1)
                     ]
-                    f.write(f"pair_coeff * * {self.params['2D']['pot_type']} {l+1} {self.potentials['2D']['path']} {'  '.join(potentials[l])} # 2D Layer {l+1}\n")
+                    f.write(f"pair_coeff * * {self.params['2D']['pot_type']} {l+1} {self.potentials['2D']['path']} {'  '.join(potential_counts[l])} # 2D Layer {l+1}\n")
 
                 # Set interlayer LJ parameters
                 index_pairs = [(i, j) for i in range(layer) for j in range(i + 1, layer)]
@@ -785,9 +823,12 @@ class ModelInit:
                     self.set_sheet_LJ_params(f, index_pairs)
             else:
                 f.write(f"pair_style {self.params['2D']['pot_type']}\n")
-                potentials = [self.group_def[i][3] for i in range(1, self.data['2D']['natype'] * layer + 1)]
-                f.write(f"pair_coeff * * {self.potentials['2D']['path']} {'  '.join(potentials)} # 2D\n")
-
+                potentials = [self.group_def[i][3] for i in range(1, num_atom_types + 1)]
+                f.write(f"pair_coeff * * {self.potentials['2D']['path']} {'  '.join(potential_counts)} # 2D\n")
+            if virtual:
+                f.writelines([f"mass {num_atom_types} 1.0\n",
+                                 f"pair_coeff * {num_atom_types} lj/cut 1e-100 1e-100\n"])
+                                 
     def set_sheet_LJ_params(self, f, index_pairs, low=False):
         """Sets Lennard-Jones (LJ) pair coefficients for 2D sheet elements.
 

@@ -193,7 +193,8 @@ class AFMSimulation(model_init.ModelInit):
             "compute         temp_sub sub_thermo temp/partial 0 1 0\n",
             f"fix             lang_sub sub_thermo langevin {self.params['general']['temp']} {self.params['general']['temp']} $(100.0*dt) 2847563 zero yes\n",
             "fix_modify      lang_sub temp temp_sub\n\n",
-            "fix             nve_all all nve\n\n",
+            "group nve_apply subtract all sub_fix tip_fix\n",
+            "fix             nve_all nve_apply nve\n\n",
         ])
 
     def generate_system_init_script(self):
@@ -348,12 +349,12 @@ class AFMSimulation(model_init.ModelInit):
                     f"read_data       {self.sheet_dir[layer]}/data/load_$(v_find)N.data extra/atom/types {extra_atom_types}\n\n",
                     f"include         {self.sheet_dir[layer]}/lammps/slide.in.settings\n\n",
                 ])
-                if drive_method == 'virtual_atom':
-                    f_out.writelines([
-                        "# Create a virtual atom and assign it to a group.\n",
-                        f"create_atoms    {self.ngroups[layer]+1} single 0 0 0 units box\n",
-                        f"group           virtual type {self.ngroups[layer]+1}\n",
-                    ])
+                # if drive_method == 'virtual_atom':
+                #     f_out.writelines([
+                #         "# Create a virtual atom and assign it to a group.\n",
+                #         f"create_atoms    {self.ngroups[layer]+1} single 0 0 0 units box\n",
+                #         f"group           virtual type {self.ngroups[layer]+1}\n",
+                #     ])
                     
                 if self.settings['output']['dump']['slide']:
                     f_out.writelines([
@@ -423,7 +424,8 @@ class AFMSimulation(model_init.ModelInit):
                         f"variable virtual_x equal $(v_comx_tip)+{virtual_offset}*$(v_spring_x)\n",
                         f"variable virtual_y equal $(v_comy_tip)+{virtual_offset}*$(v_spring_y)\n",
                         f"variable virtual_z equal $(v_comz_tip)\n",
-                        f"displace_atoms virtual move v_virtual_x v_virtual_y v_virtual_z units box\n",
+                        f"create_atoms    {self.ngroups[layer]+1} single $(v_virtual_x) $(v_virtual_y) $(v_virtual_z) units box\n",
+                        f"group           virtual type {self.ngroups[layer]+1}\n",
                         f"velocity        virtual set 0.0 0.0 0.0\n",
                         f"fix             spr {tip_fix_group} spring couple virtual {spring_ev} 0.0 0.0 NULL {virtual_offset} \n\n",
                         f"fix             move_virtual virtual move linear $(v_spring_x*{tipps}) $(v_spring_y*{tipps}) 0.0\n",

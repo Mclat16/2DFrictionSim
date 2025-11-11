@@ -2,6 +2,7 @@ import os
 import re
 import logging
 import tempfile
+import numpy as np
 
 from tribo_2D import model_init, utilities
 
@@ -160,44 +161,72 @@ class SheetvsheetSimulation(model_init.ModelInit):
         - Defining output computes for friction and other metrics.
         """
         settings_filename = f"{self.dir}/lammps/system.in.settings"
-        super().sheet_potential(settings_filename, 4, True)
+        super().sheet_potential(settings_filename, 4, True, virtual = True)
 
         filename = f"{self.dir}/lammps/slide.lmp"
 
         with open(filename, 'w', encoding="utf-8") as f_out:
-            f_out.writelines([
-                f"variable find index {' '.join(str(x) for x in self.params['general']['force'])}\n",
-                "label force_loop\n",
+            if isinstance(self.params['general']['pressure'], (list, tuple)):
+                f_out.writelines([
+                    f"variable pressure index {' '.join(str(x) for x in self.params['general']['pressure'])}\n",
+                    "label force_loop\n",
+                ])
+            else:
+                f_out.writelines([
+                    f"variable pressure equal {self.params['general']['pressure']}\n",
+                ])
 
-                f"variable a index 0 {' '.join(str(x) for x in self.scan_angle)} 0\n",
-                "label angle_loop\n",
-            ])
+            if self.scan_angle is not None:
+                if isinstance(self.scan_angle, (list, tuple, np.ndarray)):
+                    # Multiple values
+                    f_out.writelines([
+                        f"variable a index 0 {' '.join(str(x) for x in self.scan_angle)}\n",
+                        "label angle_loop\n",
+                    ])
+                else:
+                    # Single value
+                    f_out.writelines([
+                        f"variable a equal {self.scan_angle}\n",
+                    ])
+            else:
+                # self.scan_angle does not exist, default to 0
+                f_out.writelines([
+                    "variable a equal 0\n",
+                ])
+            
             utilities.atomic2molecular(f"{self.dir}/build/{self.params['2D']['mat']}_4.lmp")
             f_out.writelines(self.init(neigh=True, atom_style='molecular'))
             f_out.writelines([
+                f"if '$(v_a) != 0' then &\n",
+                "'boundary fm fm f'\n",
+
                 "comm_style       tiled\n",
                 "#------------------Create Geometry------------------------\n",
                 "#----------------- Define the simulation box -------------\n",
                 f"region          box block {self.dim['xlo']} {self.dim['xhi']} {self.dim['ylo']} {self.dim['yhi']} -40.0 40.0 units box\n",
-                f"create_box      {self.ngroups[4]} box bond/types 1 extra/bond/per/atom 100\n\n",
+                f"create_box      {self.ngroups[4]+1} box bond/types 1 extra/bond/per/atom 100\n\n",
                 f"read_data       {self.dir}/build/{self.params['2D']['mat']}_4.lmp extra/bond/per/atom 100 add append group bot\n\n",
-                "balance 1.0 rcb\n",
+                
+
                 "#----------------- Create visualisation files ------------\n\n"
                 f"include {settings_filename}\n",
                 "# Create bonds\n",
                 "bond_style harmonic\n",
                 f"bond_coeff 1 {self.params['general']['cspring']} {self.lat_c} \n",
-                f"create_bonds many layer_1 layer_2 1 {self.lat_c - 0.15} {self.lat_c + 0.15}\n",
                 f"create_bonds many layer_3 layer_4 1 {self.lat_c - 0.15} {self.lat_c + 0.15}\n\n",
             ])
 
             if self.settings['output']['dump']['slide']:
                 f_out.writelines([
-                    f"dump            sys all atom {self.settings['output']['dump_frequency']['slide']} ./{self.dir}/visuals/$(v_find)nN_$(v_a)angle_{self.params['general']['scan_speed']}ms.lammpstrj\n\n",
-                    "dump_modify sys append yes\n"
+                    f"dump            sys all atom {self.settings['output']['dump_frequency']['slide']} ./{self.dir}/visuals/$(v_pressure)GPa_$(v_a)angle_{self.params['general']['scan_speed']}ms.lammpstrj\n\n",
                 ])
 
             f_out.writelines([
+                "balance 1.0 rcb\n",
+                "# Minimize the system.\n",
+                f"min_style      {self.settings['simulation']['min_style']}\n",
+                f"{self.settings['simulation']['minimization_command']}\n",
+                
                 "##########################################################\n",
                 "#------------------- Apply Constraints ------------------#\n",
                 "##########################################################\n\n",
@@ -207,10 +236,28 @@ class SheetvsheetSimulation(model_init.ModelInit):
                 f"velocity        center create {self.params['general']['temp']} 492847948\n",
                 f"fix             lang center langevin {self.params['general']['temp']} {self.params['general']['temp']} $(100.0*dt) 2847563 zero yes\n\n",
 
-                "fix             nve_all all nve\n\n",
+                "fix             nve_center center nve\n\n",
 
                 f"timestep        {self.settings['simulation']['timestep']}\n",
                 f"thermo          {self.settings['simulation']['thermo']}\n\n",
+
+                "fix             fstage_top layer_4 rigid/nve single force * on on on torque * off off off\n",
+                "fix             fsbot layer_1 setforce 0.0 0.0 0.0 \n",
+                "velocity        layer_1 set 0.0 0.0 0.0 units box\n\n",
+                
+                f"if '$(v_a) != 0' then &\n",
+                "'variable omega equal v_a/1000' &\n",
+                "'fix rot layer_4 move rotate ${comx_top} ${comy_top} ${comz_top} 0 0 1 ${omega}' &\n",
+                "'run             1000' &\n",
+                "'unfix rot'\n\n",
+
+                "#---------- Apply Uniform Pressure to top layer ----------\n",
+                # 1 eV/Å^3= 160.2176621 GPa
+                f"variable        A          equal ({self.dim['xhi']}-{self.dim['xlo']})*({self.dim['yhi']}-{self.dim['ylo']})\n",  
+                "variable        p          equal v_pressure/160.2176565 # ev/A^3\n",
+                "variable        f          equal -v_p*v_A/(count(layer_4)) # ev/A^2\n\n",
+
+                "fix force layer_4 aveforce 0.0 0.0 $f\n\n",
 
                 "compute COM_top layer_4 com\n",
                 "variable comx_top equal c_COM_top[1] \n",
@@ -226,51 +273,72 @@ class SheetvsheetSimulation(model_init.ModelInit):
                 "variable comx_cbot equal c_COM_cbot[1] \n",
                 "variable comy_cbot equal c_COM_cbot[2] \n",
                 "variable comz_cbot equal c_COM_cbot[3] \n\n",
-
-                "fix             fstage_top layer_4 rigid single force * on on off torque * off off off\n",
-                "fix             fsbot layer_1 setforce 0.0 0.0 0.0 \n",
-                "velocity        layer_1 set 0.0 0.0 0.0 units box\n\n",
-
-                "run 1000\n\n",
                 
-                f"if '$(v_a) != 0' then &\n",
-                "'variable omega equal v_a/10000' &\n",
-                "'fix rot layer_4 move rotate ${comx_top} ${comy_top} ${comz_top} 0 0 1 ${omega}' &\n",
-                "'run             10000' &\n",
-                "'unfix rot'\n\n",
-
-                "unfix fstage_top\n",
-
-                "fix             fstage_top layer_4 rigid single force * off off off torque * off off off\n\n",
-
-                "variable        f          equal -v_find/1.602176565\n",
-                "variable n equal v_f/(count(layer_4))\n",
-                "fix force layer_4 aveforce 0.0 0.0 $n\n\n",
-
-                "run             10000\n\n",
-
+                "compute COM_bot layer_1 com \n",
+                "variable comx_bot equal c_COM_bot[1] \n",
+                "variable comy_bot equal c_COM_bot[2] \n",
+                "variable comz_bot equal c_COM_bot[3] \n\n",
+                
                 "variable        fx   equal  f_force[1]*1.602176565\n",
                 "variable        fy   equal  f_force[2]*1.602176565\n",
                 "variable        fz   equal  f_force[3]*1.602176565\n\n",
 
+                "variable        sx   equal  f_fsbot[1]*1.602176565\n",
+                "variable        sy   equal  f_fsbot[2]*1.602176565\n",
+                "variable        sz   equal  f_fsbot[3]*1.602176565\n\n",
+
+                "compute frict layer_3 group/group layer_2\n",
+                "variable xfrict equal c_frict[1]\n",
+                "variable yfrict equal c_frict[2]\n\n",
+
+                "run             10000\n\n",
+
+                "variable r0_new equal ${comz_top}-${comz_ctop}\n",
+                "bond_coeff 1 5 ${r0_new}\n",
+
+                "variable virtual_x equal $(v_comx_top)\n",
+                "variable virtual_y equal $(v_comy_top)\n",
+                "variable virtual_z equal $(v_comz_top)+10\n",
+                f"create_atoms    {self.ngroups[4]+1} single $(v_virtual_x) $(v_virtual_y) $(v_virtual_z) units box\n",
+                f"group           virtual type {self.ngroups[4]+1}\n\n",
+                
+                "velocity        layer_4 set 0.0 0.0 0.0 units box\n",
+                "velocity        virtual set 0.0 0.0 0.0\n",
+                "fix             spr layer_4 spring couple virtual 50 0.0 0.0 NULL 0\n\n",
+
+                f"fix        move_virtual virtual move linear {self.params['general']['scan_speed']/100} 0.0 0.0 \n\n",
+
                 "#----------------- Output values -------------------------\n",
-                f"fix             fc_ave all ave/time 1 1000 {self.settings['output']['results_frequency']} v_fx v_fy v_fz v_comx_ctop v_comy_ctop v_comz_ctop v_comx_cbot v_comy_cbot v_comz_cbot file ./{self.dir}/results/fc_ave_slide_$(v_find)nN_$(v_a)angle_{self.params['general']['scan_speed']}ms\n\n",
+                f"fix             fc_ave all ave/time 1 1000 {self.settings['output']['results_frequency']} v_xfrict v_yfrict v_sx v_sy v_sz v_fx v_fy v_fz v_comx_ctop v_comy_ctop v_comz_ctop v_comx_cbot v_comy_cbot v_comz_cbot file ./{self.dir}/results/fc_ave_slide_$(v_pressure)GPa_$(v_a)angle_{self.params['general']['scan_speed']}ms\n\n",
 
-                f"velocity        layer_4 set {self.params['general']['scan_speed']/100} 0.0 0.0 \n",
                 f"run             {self.settings['simulation']['slide_run_steps']}\n\n",
-
-                f"if '$(v_a) == {self.params['general']['scan_angle'][1]}' then &\n",
-                "'next a' & \n",
-                "'jump SELF find_incr'\n\n",
-
-                f"if '$(v_find) == {self.params['general']['scan_angle'][3]}' then &\n",
-                "'next a' & \n",
-                "'clear' & \n",
-                "'jump SELF angle_loop'\n\n",
-
-                "label find_incr\n\n",
-                "next find\n",
-                "clear\n",
-                "jump SELF force_loop"
             ])
+            
+
+            if isinstance(self.scan_angle, (list, tuple, np.ndarray)):
+                f_out.writelines([
+                f"if '$(v_a) == {self.params['general']['scan_angle'][1]}' then &\n",
+                "'jump SELF pressure_incr'\n\n",
+                ])
+                if isinstance(self.params['general']['scan_angle'][3], (int, float)):
+                    f_out.writelines([
+                        f"if '$(v_pressure) == {self.params['general']['scan_angle'][3]}' then &\n",
+                        "'next a' & \n",
+                        "'clear' & \n",
+                        "'jump SELF angle_loop'\n\n",
+                    ])
+                else:
+                    f_out.writelines([
+                        f"next a\n",
+                        "clear\n",
+                        "jump SELF angle_loop\n\n",
+                    ])
+                f_out.write("label pressure_incr\n\n")
+                
+            if isinstance(self.params['general']['pressure'], (list, tuple)):     
+                f_out.writelines([
+                    "next pressure\n",
+                    "clear\n",
+                    "jump SELF force_loop"
+                ])
 
