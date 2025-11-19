@@ -3,13 +3,12 @@
 import logging
 import shutil
 from pathlib import Path
-from typing import List, Dict, Any
-
-from ase import data as ase_data
+from typing import Dict, Any
 
 from FrictionSim2D.core.base_builder import BaseBuilder
 from FrictionSim2D.builders import components
-from FrictionSim2D.core.utils import count_atomtypes, lj_params, cifread
+from FrictionSim2D.core.utils import count_atomtypes, cifread, get_material_path, get_potential_path
+
 logger = logging.getLogger(__name__)
 
 class SheetVsSheetSimulation(BaseBuilder):
@@ -103,10 +102,19 @@ class SheetVsSheetSimulation(BaseBuilder):
         """Reads CIF/Potential data."""
         cif_path = Path(component_config.cif_path)
         if not cif_path.exists():
-            cif_path = components._get_material_path(component_config.cif_path, 'cif')
+            cif_path = get_material_path(component_config.cif_path, 'cif')
             
         data = cifread(cif_path)
+        
+        # Resolve Potential Path using helper
         pot_path = Path(component_config.pot_path)
+        if not pot_path.exists():
+            pot_path = get_potential_path(str(component_config.pot_path))
+        
+        # Check again if found
+        if not pot_path.exists():
+            raise FileNotFoundError(f"Potential file '{component_config.pot_path}' not found in package data.")
+
         counts = count_atomtypes(pot_path, data['elements'])
         
         dest_pot = self.work_dir / "potentials" / pot_path.name

@@ -5,72 +5,21 @@ required for simulations: Tips, Substrates, and Sheets.
 It orchestrates Atomsk for structure generation and LAMMPS for 
 geometric manipulations (carving, stacking).
 """
+from pathlib import Path
+from importlib import resources
 
-import os
 import shutil
 import logging
 import numpy as np
-from pathlib import Path
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Tuple, List, Dict, Any
 from lammps import lammps
-from importlib import resources
 
 from FrictionSim2D.core.config import TipConfig, SubstrateConfig, SheetConfig, GlobalSettings
+from FrictionSim2D.core.utils import get_material_path, get_model_dimensions
 from FrictionSim2D.interfaces.atomsk import AtomskWrapper
-from FrictionSim2D.core.utils import get_model_dimensions, cifread
 
 logger = logging.getLogger(__name__)
 
-def _get_material_path(mat_name: str, file_type: str = 'cif') -> Path:
-    """Helper to find material files in the package data."""
-    # Access the base materials directory
-    mat_dir = resources.files('FrictionSim2D.data.materials')
-    
-    # Potential locations to check
-    candidates = [
-        mat_dir.joinpath(mat_name),                                # direct match
-        mat_dir.joinpath(f"{mat_name}.{file_type}"),               # match with extension
-        mat_dir.joinpath('cif', mat_name),                         # inside cif/ subdir
-        mat_dir.joinpath('cif', f"{mat_name}.{file_type}"),        # inside cif/ subdir with extension
-    ]
-
-    for candidate in candidates:
-        if candidate.exists():
-            return Path(str(candidate))
-
-    # If not found, return the original path string. 
-    # The user might have provided an absolute path.
-    return Path(mat_name)
-
-def _get_potential_path(pot_name: str) -> Path:
-    """Helper to find potential files in the package data recursively.
-    
-    This handles cases where potentials are in subfolders like 'sw/', 'tersoff/'.
-    """
-    # Access the base potentials directory
-    pot_dir = resources.files('FrictionSim2D.data.potentials')
-    
-    # 1. Check direct path (if user provided 'sw/MoS2.sw')
-    direct_path = pot_dir.joinpath(pot_name)
-    if direct_path.is_file():
-        return Path(str(direct_path))
-        
-    # 2. Check recursively in subdirectories
-    target_name = Path(pot_name).name # Extract filename 'MoS2.sw' from 'sw/MoS2.sw' just in case
-    
-    base_path = Path(str(pot_dir))
-    
-    # Use rglob for recursive search (cleaner than os.walk)
-    try:
-        # Look for exact filename match in any subdirectory
-        matches = list(base_path.rglob(target_name))
-        if matches:
-            return matches[0] # Return the first match
-    except Exception as e:
-        logger.warning(f"Failed recursive search for potential: {e}")
-
-    # If not found in package, assume absolute path
-    return Path(pot_name)
 
 def run_lammps_commands(commands: List[str]) -> None:
     """Runs a list of LAMMPS commands using the Python interface."""
@@ -149,7 +98,7 @@ def stack_sheets(
         # Optional: Renumber types for this layer to make them unique?
         # If 'remap_types' is True or provided in layer info.
         if layer.get('remap_types', False):
-             pass
+            pass
 
     cmds.append(f"write_data {output_path}")
     
@@ -165,7 +114,7 @@ def build_tip(
     """Builds the AFM tip structure."""
     cif_path = Path(config.cif_path)
     if not cif_path.exists():
-        cif_path = _get_material_path(config.cif_path, 'cif')
+        cif_path = get_material_path(config.cif_path, 'cif')
     
     base_lmp = build_dir / f"{config.mat}_base.lmp"
     final_lmp = build_dir / "tip.lmp"
@@ -173,9 +122,9 @@ def build_tip(
 
     if config.amorph == 'a':
         amor_filename = f"amor_{config.mat}.lmp"
-        amor_path = _get_material_path(amor_filename, 'lmp')
+        amor_path = get_material_path(amor_filename, 'lmp')
         if amor_path.exists():
-             shutil.copy(amor_path, base_lmp)
+            shutil.copy(amor_path, base_lmp)
         else:
             logger.warning(f"Amorphous source {amor_filename} not found. Generating crystalline base.")
             atomsk.create_slab(cif_path, base_lmp, pre_duplicate=[2, 2, 1])
@@ -219,7 +168,7 @@ def build_substrate(
     """Builds the substrate slab."""
     cif_path = Path(config.cif_path)
     if not cif_path.exists():
-        cif_path = _get_material_path(config.cif_path, 'cif')
+        cif_path = get_material_path(config.cif_path, 'cif')
         
     base_lmp = build_dir / f"{config.mat}_sub_base.lmp"
     final_lmp = build_dir / "sub.lmp"
@@ -259,7 +208,7 @@ def build_sheet(
     """Builds the 2D material sheet."""
     cif_path = Path(config.cif_path)
     if not cif_path.exists():
-        cif_path = _get_material_path(config.cif_path, 'cif')
+        cif_path = get_material_path(config.cif_path, 'cif')
         
     base_name = f"{config.mat}_1.lmp"
     base_path = build_dir / base_name

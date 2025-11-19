@@ -13,7 +13,7 @@ from ase import data as ase_data
 
 from FrictionSim2D.core.base_builder import BaseBuilder
 from FrictionSim2D.builders import components
-from FrictionSim2D.core.utils import count_atomtypes, lj_params, cifread
+from FrictionSim2D.core.utils import count_atomtypes, lj_params, cifread, get_material_path, get_potential_path
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ class AFMSimulation(BaseBuilder):
         # Resolve CIF path
         cif_path = Path(component_config.cif_path)
         if not cif_path.exists():
-            cif_path = components._get_material_path(component_config.cif_path, 'cif')
+            cif_path = get_material_path(component_config.cif_path, 'cif')
             
         # Read Material Data
         data = cifread(cif_path)
@@ -79,13 +79,13 @@ class AFMSimulation(BaseBuilder):
         # Resolve Potential Path using helper
         pot_path = Path(component_config.pot_path)
         if not pot_path.exists():
-             # Explicitly resolve using the helper
-             pot_path = components._get_potential_path(str(component_config.pot_path))
-        
+            # Explicitly resolve using the helper
+            pot_path = get_potential_path(str(component_config.pot_path))
+    
         # Check again if found
         if not pot_path.exists():
-             raise FileNotFoundError(f"Potential file '{component_config.pot_path}' not found in package data.")
-             
+            raise FileNotFoundError(f"Potential file '{component_config.pot_path}' not found in package data.")
+            
         # Count atom types based on potential file
         # This determines if 'C' becomes 'C1' and 'C2' in LAMMPS
         counts = count_atomtypes(pot_path, data['elements'])
@@ -300,15 +300,15 @@ class AFMSimulation(BaseBuilder):
                 
                 f.write(f"pair_coeff * * {self.config.sheet.pot_type} {sheet_pot_path} {' '.join(line_args)}\n")
         else:
-             # Non-LJ (AIREBO etc) applies to all sheet atoms at once
-             line_args = []
-             for t in range(1, max_type + 1):
+            # Non-LJ (AIREBO etc) applies to all sheet atoms at once
+            line_args = []
+            for t in range(1, max_type + 1):
                 if t in self.group_definitions and "sheet" in self.group_definitions[t][0]:
                     el = self.group_definitions[t][2]
                     line_args.append(el)
                 else:
                     line_args.append("NULL")
-             f.write(f"pair_coeff * * {self.config.sheet.pot_type} {sheet_pot_path} {' '.join(line_args)}\n")
+            f.write(f"pair_coeff * * {self.config.sheet.pot_type} {sheet_pot_path} {' '.join(line_args)}\n")
 
         # Substrate & Tip
         for sys_name in ['sub', 'tip']:
@@ -343,20 +343,20 @@ class AFMSimulation(BaseBuilder):
 
         # Tip-Sheet, Sub-Sheet, Tip-Sub
         def write_lj_interaction(sys_a, sys_b, group_a_getter, group_b_getter):
-             elements_a = self.meta_data[sys_a]['elements']
-             elements_b = self.meta_data[sys_b]['elements']
-             
-             for el_a in set(elements_a):
-                 for el_b in set(elements_b):
-                     eps, sig = lj_params(el_a, el_b)
-                     
-                     # Get type ranges
-                     types_a = group_a_getter(sys_a, el_a)
-                     types_b = group_b_getter(sys_b, el_b)
-                     
-                     if not types_a or not types_b: continue
-                     
-                     f.write(f"pair_coeff {types_a[0]}*{types_a[-1]} {types_b[0]}*{types_b[-1]} lj/cut {eps} {sig}\n")
+            elements_a = self.meta_data[sys_a]['elements']
+            elements_b = self.meta_data[sys_b]['elements']
+            
+            for el_a in set(elements_a):
+                for el_b in set(elements_b):
+                    eps, sig = lj_params(el_a, el_b)
+                    
+                    # Get type ranges
+                    types_a = group_a_getter(sys_a, el_a)
+                    types_b = group_b_getter(sys_b, el_b)
+                    
+                    if not types_a or not types_b: continue
+                    
+                    f.write(f"pair_coeff {types_a[0]}*{types_a[-1]} {types_b[0]}*{types_b[-1]} lj/cut {eps} {sig}\n")
 
         # Helpers to get type lists
         def get_sheet_types(sys, el):

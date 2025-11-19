@@ -4,23 +4,70 @@ This module provides tools for reading, writing, and modifying simulation
 files (e.g., CIF, LAMMPS data), parsing configuration files, and calculating
 physical parameters like Lennard-Jones coefficients.
 """
-
+from importlib import resources
 import configparser
 import json
+import logging
 import os
 import re
 import shutil
 from pathlib import Path
 from typing import Dict, List, Tuple, Union, Any
-
 import numpy as np
 import yaml
 
-# Import the UFF parameters directly.
-# Note: In the new structure, this file must be importable. 
-# Ideally, UFF_params should be a proper module or data file.
-# For now, we assume it is available in the python path or we load it dynamically.
 from FrictionSim2D.data.potentials import UFF_params as lj
+
+def get_material_path(mat_name: str, file_type: str = 'cif') -> Path:
+    """Helper to find material files in the package data."""
+    # Access the base materials directory
+    mat_dir = resources.files('FrictionSim2D.data.materials')
+    
+    # Potential locations to check
+    candidates = [
+        mat_dir.joinpath(mat_name),                                # direct match
+        mat_dir.joinpath(f"{mat_name}.{file_type}"),               # match with extension
+        mat_dir.joinpath('cif', mat_name),                         # inside cif/ subdir
+        mat_dir.joinpath('cif', f"{mat_name}.{file_type}"),        # inside cif/ subdir with extension
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return Path(str(candidate))
+
+    # If not found, return the original path string. 
+    # The user might have provided an absolute path.
+    return Path(mat_name)
+
+def get_potential_path(pot_name: str) -> Path:
+    """Helper to find potential files in the package data recursively.
+    
+    This handles cases where potentials are in subfolders like 'sw/', 'tersoff/'.
+    """
+    # Access the base potentials directory
+    pot_dir = resources.files('FrictionSim2D.data.potentials')
+
+    # 1. Check direct path (if user provided 'sw/MoS2.sw')
+    direct_path = pot_dir.joinpath(pot_name)
+    if direct_path.is_file():
+        return Path(str(direct_path))
+
+    # 2. Check recursively in subdirectories
+    target_name = Path(pot_name).name # Extract filename 'MoS2.sw' from 'sw/MoS2.sw' just in case
+
+    base_path = Path(str(pot_dir))
+
+    # Use rglob for recursive search (cleaner than os.walk)
+    try:
+        # Look for exact filename match in any subdirectory
+        matches = list(base_path.rglob(target_name))
+        if matches:
+            return matches[0] # Return the first match
+    except Exception as e:
+        logging.warning(f"Failed recursive search for potential: {e}")
+
+    # If not found in package, assume absolute path
+    return Path(pot_name)
 
 def read_yaml(filepath: Union[str, Path]) -> Dict[str, Any]:
     """Reads a YAML file and returns its contents as a dictionary.

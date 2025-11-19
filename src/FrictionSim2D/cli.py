@@ -6,14 +6,13 @@ This module defines the entry point for the application. It handles:
 3. Dispatching the appropriate Simulation Builder.
 4. Managing internal application settings.
 """
+from pathlib import Path
+from importlib import resources
 
 import argparse
 import logging
 import sys
-import shutil
 import yaml
-from pathlib import Path
-from importlib import resources
 
 from FrictionSim2D.core.config import (
     AFMSimulationConfig, 
@@ -21,7 +20,7 @@ from FrictionSim2D.core.config import (
     load_default_settings
 )
 from FrictionSim2D.builders.afm import AFMSimulation
-from FrictionSim2D.builders.sheetvsheet import SheetVsSheetSimulation
+from FrictionSim2D_project.src.FrictionSim2D.builders.sheetonsheet import SheetVsSheetSimulation
 
 # Configure logging
 logging.basicConfig(
