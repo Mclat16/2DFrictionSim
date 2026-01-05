@@ -7,7 +7,6 @@ physical parameters like Lennard-Jones coefficients.
 from importlib import resources
 import configparser
 import json
-import logging
 import os
 import re
 import shutil
@@ -21,10 +20,15 @@ from FrictionSim2D.data.potentials import UFF_params as lj
 
 def get_material_path(mat_name: str, file_type: str = 'cif') -> Path:
     """Helper to find material files in the package data."""
+    # First check if user provided a path (absolute or relative) that exists
+    user_path = Path(mat_name)
+    if user_path.exists():
+        return user_path
+    
     # Access the base materials directory
     mat_dir = resources.files('FrictionSim2D.data.materials')
 
-    # Potential locations to check
+    # Potential locations to check in package data
     candidates = [
         mat_dir.joinpath(mat_name),                                # direct match
         mat_dir.joinpath(f"{mat_name}.{file_type}"),               # match with extension
@@ -36,36 +40,57 @@ def get_material_path(mat_name: str, file_type: str = 'cif') -> Path:
         if candidate.exists():
             return Path(str(candidate))
 
-    # If not found, return the original path string.
-    # The user might have provided an absolute path.
-    return Path(mat_name)
+    # If not found, return the original path
+    # (might be non-existent file - let caller handle)
+    return user_path
 
 def get_potential_path(pot_name: str) -> Path:
     """Helper to find potential files in the package data recursively.
     
     This handles cases where potentials are in subfolders like 'sw/', 'tersoff/'.
     """
-    # Access the base potentials directory
+    # Access the base potentials directory using importlib.resources
     pot_dir = resources.files('FrictionSim2D.data.potentials')
 
     # 1. Check direct path (if user provided 'sw/MoS2.sw')
     direct_path = pot_dir.joinpath(pot_name)
     if direct_path.is_file():
+        # For Traversable objects, use the underlying path if available
         return Path(str(direct_path))
 
-    # 2. Check recursively in subdirectories
-    target_name = Path(pot_name).name # Extract filename 'MoS2.sw' from 'sw/MoS2.sw' just in case
-
-    base_path = Path(str(pot_dir))
-
-    # Use rglob for recursive search (cleaner than os.walk)
-    try:
-        # Look for exact filename match in any subdirectory
-        matches = list(base_path.rglob(target_name))
-        if matches:
-            return matches[0] # Return the first match
-    except OSError as e:
-        logging.warning("Failed recursive search for potential: %s", e)
+    # 2. Check in subdirectories based on file extension
+    target_name = Path(pot_name).name
+    ext = Path(pot_name).suffix.lstrip('.')  # Get extension without dot
+    
+    # Common subdirectory mappings
+    subdir_map = {
+        'sw': 'sw',
+        'tersoff': 'tersoff',
+        'rebo': 'rebo',
+        'airebo': 'airebo',
+        'reaxff': 'reaxff',
+        'meam': 'meam',
+        'extep': 'extep',
+        'vashishta': 'vashishta',
+        'adp': 'adp',
+        'bop': 'bop',
+    }
+    
+    # Try subdirectory based on extension
+    if ext in subdir_map:
+        subdir = subdir_map[ext]
+        subdir_path = pot_dir.joinpath(subdir, target_name)
+        if subdir_path.is_file():
+            return Path(str(subdir_path))
+    
+    # 3. Try all known subdirectories
+    for subdir in subdir_map.values():
+        try:
+            subdir_traversable = pot_dir.joinpath(subdir, target_name)
+            if subdir_traversable.is_file():
+                return Path(str(subdir_traversable))
+        except (TypeError, FileNotFoundError):
+            continue
 
     # If not found in package, assume absolute path
     return Path(pot_name)

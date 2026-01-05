@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jinja2 import Environment, FileSystemLoader, select_autoescape, BaseLoader, TemplateNotFound
 from importlib import resources
 
 # Import the configuration model base for type hinting
@@ -19,6 +19,31 @@ from FrictionSim2D.core.config import AFMSimulationConfig, GlobalSettings
 from FrictionSim2D.interfaces.atomsk import AtomskWrapper
 
 logger = logging.getLogger(__name__)
+
+
+class PackageLoader(BaseLoader):
+    """Jinja2 loader that works with importlib.resources Traversable objects."""
+    
+    def __init__(self, package_name: str):
+        self.package_name = package_name
+        self._package = resources.files(package_name)
+    
+    def get_source(self, environment, template):
+        try:
+            # Navigate the path
+            parts = template.split('/')
+            current = self._package
+            for part in parts:
+                current = current.joinpath(part)
+            
+            if not current.is_file():
+                raise TemplateNotFound(template)
+            
+            source = current.read_text(encoding='utf-8')
+            # Use a dummy path for the filename
+            return source, template, lambda: True
+        except (FileNotFoundError, TypeError):
+            raise TemplateNotFound(template)
 
 class BaseBuilder(ABC):
     """Abstract base class for simulation builders.
@@ -41,11 +66,9 @@ class BaseBuilder(ABC):
         self.output_dir = Path(output_dir).resolve()
         self.atomsk = AtomskWrapper()
         
-        # Initialize Jinja2 Environment
-        # We point it to the installed 'templates' directory package
-        template_path = resources.files('FrictionSim2D.templates')
+        # Initialize Jinja2 Environment with custom package loader
         self.jinja_env = Environment(
-            loader=FileSystemLoader(str(template_path)),
+            loader=PackageLoader('FrictionSim2D.templates'),
             autoescape=select_autoescape(),
             trim_blocks=True,
             lstrip_blocks=True

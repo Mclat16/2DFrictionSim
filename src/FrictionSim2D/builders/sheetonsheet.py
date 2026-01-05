@@ -1,153 +1,169 @@
 """Sheet-on-Sheet Simulation Builder.
 
 This module orchestrates the setup of a friction simulation between two
-2D material sheets. It coordinates the construction of the top and bottom
-sheets, manages their "ghost" interactions, and generates LAMMPS scripts.
+2D material sheets. The standard model is a 4-layer stack:
+  - Layer 1: Fixed (bottom)
+  - Layer 2-3: Mobile with Langevin thermostat (friction interface)
+  - Layer 4: Rigid, driven by virtual atom (top)
+
+Interlayer interactions:
+  - Adjacent layers (1-2, 2-3, 3-4): Real LJ interactions
+  - Non-adjacent layers (1-3, 1-4, 2-4): Ghost interactions (prevent interpenetration)
 """
 
 import logging
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Optional
 
 from FrictionSim2D.core.base_builder import BaseBuilder
-from FrictionSim2D.core.config import AFMSimulationConfig
+from FrictionSim2D.core.config import SheetOnSheetSimulationConfig
 from FrictionSim2D.core.potential_manager import PotentialManager
 from FrictionSim2D.builders import components
 
 logger = logging.getLogger(__name__)
 
-class SheetVsSheetSimulation(BaseBuilder):
-    """Builder for Sheet-on-Sheet friction simulations."""
+# Standard 4-layer model configuration
+N_LAYERS = 4
 
-    def __init__(self, config: AFMSimulationConfig, output_dir: str):
+
+class SheetOnSheetSimulation(BaseBuilder):
+    """Builder for Sheet-on-Sheet friction simulations.
+    
+    Creates a 4-layer stack of the same 2D material:
+      - Layer 1: Fixed bottom layer
+      - Layer 2: Mobile (Langevin thermostat)
+      - Layer 3: Mobile (Langevin thermostat)  
+      - Layer 4: Driven top layer (rigid body)
+    """
+
+    def __init__(self, config: SheetOnSheetSimulationConfig, output_dir: str):
         super().__init__(config, output_dir)
-        self.config: AFMSimulationConfig = config
+        self.config: SheetOnSheetSimulationConfig = config
         
         # State
         self.structure_paths: Dict[str, Path] = {}
         self.z_positions: Dict[str, float] = {}
         self.groups: Dict[str, str] = {}
+        self.pm: Optional[PotentialManager] = None
 
     def build(self) -> None:
-        """Constructs the dual-sheet system."""
-        logger.info("Starting Sheet-vs-Sheet Build...")
+        """Constructs the 4-layer sheet stack."""
+        logger.info("Starting Sheet-vs-Sheet Build (4-layer model)...")
         self._create_directories()
         build_dir = self.output_dir / "build"
-
-        # 1. Build Components
-        # Bottom Sheet (Acts as substrate)
-        # Note: Config currently has one 'sheet' entry. 
-        # Ideally, we'd have 'sheet_top' and 'sheet_bottom' configs.
-        # Assuming for now we use the SAME material for both, just stacked differently.
         
-        logger.info("Building Bottom Sheet...")
-        bot_path, dims, lat_c = components.build_sheet(
-            self.config.sheet, self.atomsk, build_dir, stack_if_multi=True
+        # Build the 4-layer sheet stack
+        logger.info(f"Building {N_LAYERS}-layer sheet stack...")
+        sheet_path, dims, lat_c = components.build_sheet(
+            self.config.sheet, self.atomsk, build_dir,
+            stack_if_multi=True, settings=self.config.settings,
+            n_layers_override=N_LAYERS
         )
-        self.structure_paths['bottom'] = bot_path
-        
-        logger.info("Building Top Sheet...")
-        top_path, _, _ = components.build_sheet(
-            self.config.sheet, self.atomsk, build_dir, stack_if_multi=True
-        )
-        self.structure_paths['top'] = top_path
+        self.structure_paths['sheet'] = sheet_path
 
-        # 2. Calculate Layout
-        # Bottom sheet starts at 0
-        self.z_positions['bottom'] = 0.0
+        # Generate Potentials
+        self.pm = self._generate_potentials()
+
+        # Calculate Z positions for each layer
+        self.z_positions['layer_1'] = 0.0
+        self.z_positions['layer_2'] = lat_c
+        self.z_positions['layer_3'] = 2 * lat_c
+        self.z_positions['layer_4'] = 3 * lat_c
         
-        # Top sheet starts above bottom sheet
-        # Gap calculation
-        # Since they are likely same material, use self-interaction sigma or standard calculation
-        gap = self._calculate_gap(self.config.sheet, self.config.sheet, buffer=0.5)
-        
-        n_layers = max(self.config.sheet.layers) if self.config.sheet.layers else 1
-        bot_height = (n_layers - 1) * lat_c
-        
-        self.z_positions['top'] = bot_height + gap
-        
-        # 3. Generate Potentials
-        self._generate_potentials()
+        # Store calculated values
+        self.lat_c = lat_c
+        self.sheet_dims = dims
         
         logger.info("Build complete.")
 
-    def _calculate_gap(self, comp1, comp2, buffer=0.5):
-        """Calculates gap based on max sigma."""
-        # Helper to calculate gap (could also reuse from PM or base if moved there)
-        # For identical sheets, this is just the material's VdW gap proxy
-        pm = PotentialManager() # Temp instance just for calc
-        # We can just use utils directly if configs are available
-        # But since we have the logic in afm.py, we could move this to BaseBuilder to avoid duplication.
-        # For now, replicating the logic from afm.py for independence.
-        from FrictionSim2D.core.utils import cifread, lj_params
+    def _generate_potentials(self) -> PotentialManager:
+        """Configures potential file for 4-layer sheet-on-sheet simulation.
         
-        elems1 = cifread(comp1.cif_path)['elements']
-        elems2 = cifread(comp2.cif_path)['elements']
-        max_sigma = 0.0
-        for e1 in set(elems1):
-            for e2 in set(elems2):
-                _, sigma = lj_params(e1, e2)
-                max_sigma = max(max_sigma, sigma)
-        return max_sigma + buffer
-
-    def _generate_potentials(self) -> None:
-        """Configures potential file with Ghost interactions."""
-        pm = PotentialManager()
+        Returns:
+            Configured PotentialManager instance.
+        """
+        pm = PotentialManager(self.config.settings)
         
-        # Register
-        pm.register_component('bottom', self.config.sheet)
-        pm.register_component('top', self.config.sheet)
+        # Register single sheet component with 4 layers
+        # Each layer gets its own potential instance (for SW, Tersoff, etc.)
+        pm.register_component('sheet', self.config.sheet, n_layers=N_LAYERS)
         
-        # Interactions
-        pm.add_self_interaction('bottom')
-        pm.add_self_interaction('top')
+        # Self-Interactions: each layer gets its own many-body potential
+        pm.add_self_interaction('sheet')
         
-        # Cross Interaction: Ghost / Weak LJ
-        # We want them to interact, but perhaps with specific settings defined in config
-        # or standard LJ. Original code used 'hybrid' and specific coeffs.
-        # Defaulting to standard LJ mixing for physical friction.
-        # If "ghost" behavior (no interaction) is desired, epsilon can be set to ~0.
-        pm.add_cross_interaction('bottom', 'top', interaction_type='lj/cut')
+        # Interlayer Interactions:
+        # - Adjacent layers (distance=1): Real LJ
+        # - Non-adjacent layers (distance>1): Ghost LJ (prevent interpenetration)
+        pm.add_interlayer_lj_by_distance('sheet', max_real_distance=1)
         
         pm.write_file(self.output_dir / "lammps" / "system.in.settings")
         
-        self.groups['bottom_types'] = pm.get_group_string('bottom')
-        self.groups['top_types'] = pm.get_group_string('top')
+        # Store layer group strings
+        for layer in range(N_LAYERS):
+            layer_num = layer + 1
+            self.groups[f'layer_{layer_num}'] = pm.get_layer_group_string('sheet', layer)
+        
+        # Convenience groups
+        self.groups['center'] = f"{self.groups['layer_2']} {self.groups['layer_3']}"
+        self.groups['all_types'] = pm.get_group_string('sheet')
+        
+        return pm
 
     def write_inputs(self) -> None:
         """Generates LAMMPS scripts."""
         logger.info("Writing LAMMPS inputs...")
         
-        all_types = set()
-        for s in self.groups.values():
-            all_types.update(s.split())
-        total_types = len(all_types)
+        total_types = self.pm.get_total_types() if self.pm else 0
+        virtual_atom_type = total_types + 1
 
         context = {
+            # General settings
             'temp': self.config.general.temp,
             'pressure': self.config.general.pressure,
             'angle': self.config.general.scan_angle,
-            'speed': self.config.general.scan_speed, # Sheet-on-sheet often uses scan_speed
+            'speed': self.config.general.scan_speed,
             'settings': self.config.settings.simulation,
             
-            'path_bot': f"../build/{self.structure_paths['bottom'].name}",
-            'path_top': f"../build/{self.structure_paths['top'].name}",
+            # Structure path
+            'path_sheet': f"../build/{self.structure_paths['sheet'].name}",
             
-            'z_bot': self.z_positions['bottom'],
-            'z_top': self.z_positions['top'],
+            # Box dimensions (actual from build)
+            'xlo': self.sheet_dims.get('xlo', 0.0),
+            'xhi': self.sheet_dims.get('xhi', 100.0),
+            'ylo': self.sheet_dims.get('ylo', 0.0),
+            'yhi': self.sheet_dims.get('yhi', 100.0),
             
-            'bot_types': self.groups['bottom_types'],
-            'top_types': self.groups['top_types'],
+            # Layer groups
+            'layer_1_types': self.groups['layer_1'],
+            'layer_2_types': self.groups['layer_2'],
+            'layer_3_types': self.groups['layer_3'],
+            'layer_4_types': self.groups['layer_4'],
+            'center_types': self.groups['center'],
             'ngroups': total_types,
             
+            # Geometry
+            'n_layers': N_LAYERS,
+            'lat_c': self.lat_c,
+            'sheet_dims': self.sheet_dims,
+            
+            # Spring constants (convert N/m to eV/Å²: divide by 16.02)
+            'bond_spring_ev': (self.config.general.bond_spring or 5.0) / 16.02,
+            'driving_spring_ev': (self.config.general.driving_spring or 50.0) / 16.02,
+            
+            # Output settings
             'results_freq': self.config.settings.output.results_frequency,
-            'dump_freq': self.config.settings.output.dump_frequency['slide']
+            'dump_freq': self.config.settings.output.dump_frequency.get('slide', 1000),
+            
+            # Virtual atom for driving
+            'virtual_atom_type': virtual_atom_type,
+            'drive_method': self.config.settings.simulation.drive_method,
+            
+            # Thermostat
+            'thermostat_type': self.config.settings.thermostat.type,
         }
         
-        # Render Template
-        # Note: Sheet-on-sheet typically skips 'system_init' and goes straight to slide/equilibration
-        # or combines them. Assuming 'slide.lmp' covers the physics.
-        script = self.render_template("sheet_vs_sheet/slide.lmp", context)
+        # Render Templates
+        script = self.render_template("sheetonsheet/slide.lmp", context)
         self.write_file("lammps/slide.in", script)
         
         logger.info(f"Inputs written to {self.output_dir}/lammps/")

@@ -36,7 +36,7 @@ include         {{ potential_file }}
 
 # Bonds (Inter-layer springs)
 bond_style      harmonic
-bond_coeff      1 {{ cspring }} {{ lat_c }}
+bond_coeff      1 {{ bond_spring_ev }} {{ lat_c }}
 create_bonds    many layer_3 layer_4 1 {{ bond_min }} {{ bond_max }}
 
 {% if dump_enabled %}
@@ -118,7 +118,7 @@ group           virtual type {{ virtual_atom_type }}
 velocity        layer_4 set 0.0 0.0 0.0 units box
 velocity        virtual set 0.0 0.0 0.0
 
-fix             spr layer_4 spring couple virtual 50 0.0 0.0 NULL 0
+fix             spr layer_4 spring couple virtual {{ driving_spring_ev }} 0.0 0.0 NULL 0
 
 variable        speed_x equal cos(v_a*PI/180)
 variable        speed_y equal sin(v_a*PI/180)

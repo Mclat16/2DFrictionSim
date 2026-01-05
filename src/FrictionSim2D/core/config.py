@@ -10,9 +10,9 @@ from pathlib import Path
 from importlib import resources
 from typing import List, Optional, Union, Dict, Any, Literal
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from FrictionSim2D.core.utils import read_config
+from FrictionSim2D.core.utils import read_config, get_potential_path, get_material_path
 
 # --- Internal Settings ---
 
@@ -20,12 +20,16 @@ class GeometrySettings(BaseModel):
     tip_reduction_factor: float
     rigid_tip: bool
     tip_base_z: float
-    lat_c_default: float
+    lat_c_default: float = 6.0
 
 class ThermostatSettings(BaseModel):
-    type: Literal['langevin', 'nose-hoover']
-    time_integration: Literal['verlet', 'respa','nvt','nve']
-    langevin_boundaries: Dict[str, Dict[str, List[float]]]
+    """Thermostat and time integration settings."""
+    type: Literal['langevin', 'nose-hoover'] = 'langevin'
+    time_integration: Literal['verlet', 'respa', 'nvt', 'nve'] = Field(
+        default='nvt', alias='time_int_type')
+    langevin_boundaries: Dict[str, Dict[str, List[float]]] = Field(default_factory=dict)
+    
+    model_config = {'populate_by_name': True}
 
 class SimulationSettings(BaseModel):
     timestep: float
@@ -42,8 +46,14 @@ class QuenchSettings(BaseModel):
     n_procs: int
     quench_slab_dims: List[int]
     quench_rate: float
-    quench_melt_temp: float
+    melt_temp: float = Field(alias='quench_melt_temp')  # Temperature to melt at (K)
+    quench_temp: float = Field(300.0, alias='quench_target_temp')  # Temperature to quench to (K)
     timestep: float
+    melt_steps: int = 50000  # Steps to hold at melt temperature
+    quench_steps: int = 100000  # Steps to cool from melt to quench temp
+    equilibrate_steps: int = 20000  # Steps to equilibrate at quench temp
+    
+    model_config = {'populate_by_name': True}
 
 class OutputSettings(BaseModel):
     dump: Dict[str, bool]
@@ -51,8 +61,11 @@ class OutputSettings(BaseModel):
     results_frequency: int
     
 class PotentialSettings(BaseModel):
-    lj_cutoff: float
-    lj_type: str
+    """Settings for interatomic potentials."""
+    lj_cutoff: float = Field(default=11.0, alias='LJ_cutoff')
+    lj_type: str = Field(default='lj/cut', alias='LJ_type')
+    
+    model_config = {'populate_by_name': True}
 
 class AiidaSettings(BaseModel):
     lammps_code_label: str 
@@ -79,11 +92,32 @@ class ComponentConfig(BaseModel):
     pot_type: str
     pot_path: str
     cif_path: str
+    
+    @field_validator('pot_path', mode='after')
+    @classmethod
+    def resolve_pot_path(cls, v: str) -> str:
+        """Resolve potential path to full filesystem path if needed."""
+        path = Path(v)
+        if not path.exists():
+            resolved = get_potential_path(v)
+            if resolved.exists():
+                return str(resolved)
+        return v
+    
+    @field_validator('cif_path', mode='after')
+    @classmethod
+    def resolve_cif_path(cls, v: str) -> str:
+        """Resolve CIF path to full filesystem path if needed."""
+        path = Path(v)
+        if not path.exists():
+            resolved = get_material_path(v, 'cif')
+            if resolved.exists():
+                return str(resolved)
+        return v
 
 class TipConfig(ComponentConfig):
     r: float = Field(..., description="Tip radius in Angstroms")
     amorph: Literal['c', 'a'] = Field('c', description="'c' for crystalline, 'a' for amorphous")
-    cspring: float = Field(..., description="Spring constant")
     dspring: float = Field(0.0, description="Damping constant")
     s: float = Field(..., description="Sliding speed (m/s)")
 

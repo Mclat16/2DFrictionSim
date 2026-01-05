@@ -7,7 +7,7 @@ generates the necessary potentials, and writes the LAMMPS input scripts.
 
 import logging
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 from FrictionSim2D.core.base_builder import BaseBuilder
 from FrictionSim2D.core.config import AFMSimulationConfig
@@ -15,6 +15,7 @@ from FrictionSim2D.core.potential_manager import PotentialManager
 from FrictionSim2D.builders import components
 
 logger = logging.getLogger(__name__)
+
 
 class AFMSimulation(BaseBuilder):
     """Builder for AFM simulations (Tip + Sheet + Substrate)."""
@@ -26,13 +27,17 @@ class AFMSimulation(BaseBuilder):
         # State to track build artifacts
         self.structure_paths: Dict[str, Path] = {}
         self.z_positions: Dict[str, float] = {}
-        self.groups: Dict[str, str] = {} # Component name -> Atom type IDs string
+        self.groups: Dict[str, str] = {}  # Component name -> Atom type IDs string
+        self.pm: Optional[PotentialManager] = None  # Store PM for later use
 
     def build(self) -> None:
         """Constructs the atomic systems and layout."""
         logger.info("Starting AFM Simulation Build...")
         self._create_directories()
         build_dir = self.output_dir / "build"
+
+        # Determine number of sheet layers
+        n_sheet_layers = max(self.config.sheet.layers) if self.config.sheet.layers else 1
 
         # 1. Build Physical Components
         # Tip
@@ -43,24 +48,24 @@ class AFMSimulation(BaseBuilder):
 
         # Sheet
         sheet_path, sheet_dims, lat_c = components.build_sheet(
-            self.config.sheet, self.atomsk, build_dir, stack_if_multi=True
+            self.config.sheet, self.atomsk, build_dir, 
+            stack_if_multi=True, settings=self.config.settings
         )
         self.structure_paths['sheet'] = sheet_path
 
         # Substrate
         sub_path = components.build_substrate(
-            self.config.sub, self.atomsk, build_dir, sheet_dims
+            self.config.sub, self.atomsk, build_dir, sheet_dims,
+            settings=self.config.settings
         )
         self.structure_paths['sub'] = sub_path
 
         # 2. Generate Potentials & Calculate Gaps
-        # We need to register components first to calculate gaps using PM
-        pm = self._generate_potentials()
+        self.pm = self._generate_potentials(n_sheet_layers=n_sheet_layers)
 
         # Calculate Vertical Layout (Z-Offsets)
-        # Use the PM to calculate gaps based on max sigma + buffer
-        gap_sub_sheet = pm.calculate_gap('sub', 'sheet', buffer=0.5)
-        gap_sheet_tip = pm.calculate_gap('sheet', 'tip', buffer=0.5)
+        gap_sub_sheet = self.pm.calculate_gap('sub', 'sheet', buffer=0.5)
+        gap_sheet_tip = self.pm.calculate_gap('sheet', 'tip', buffer=0.5)
 
         logger.info(f"Calculated gaps: Sub-Sheet={gap_sub_sheet:.2f}A, Sheet-Tip={gap_sheet_tip:.2f}A")
 
@@ -74,40 +79,73 @@ class AFMSimulation(BaseBuilder):
         self.z_positions['sheet'] = sheet_base_z
 
         # Position 3: Tip (Above Sheet)
-        n_layers = max(self.config.sheet.layers) if self.config.sheet.layers else 1
-        sheet_stack_height = (n_layers - 1) * lat_c
+        sheet_stack_height = (n_sheet_layers - 1) * lat_c
 
         # Tip Z is usually center of sphere, so add radius
         tip_z = sheet_base_z + sheet_stack_height + gap_sheet_tip + tip_radius
         self.z_positions['tip'] = tip_z
 
+        # Store additional info for templates (calculated values only)
+        self.lat_c = lat_c
+        self.sheet_dims = sheet_dims
+
         logger.info("Build complete.")
 
-    def _generate_potentials(self) -> PotentialManager:
-        """Configures and writes the potential file using PotentialManager."""
-        pm = PotentialManager()
+    def _generate_potentials(
+        self, 
+        n_sheet_layers: int = 1
+    ) -> PotentialManager:
+        """Configures and writes the potential file using PotentialManager.
+        
+        Args:
+            n_sheet_layers: Number of 2D material layers.
+            
+        Returns:
+            Configured PotentialManager instance.
+        """
+        pm = PotentialManager(self.config.settings)
 
-        # Register components
+        # Register components (PM internally knows if Langevin is used)
         pm.register_component('sub', self.config.sub)
         pm.register_component('tip', self.config.tip)
-        pm.register_component('sheet', self.config.sheet)
+        
+        # Sheet with layer-specific types if multiple layers and requires LJ
+        sheet_needs_layer_types = (
+            n_sheet_layers > 1 and 
+            pm.is_sheet_lj(self.config.sheet.pot_type)
+        )
+        pm.register_component(
+            'sheet', 
+            self.config.sheet, 
+            n_layers=n_sheet_layers if sheet_needs_layer_types else 1
+        )
 
-        # Define Interactions
+        # Define Self-Interactions (many-body potentials)
         pm.add_self_interaction('sub')
         pm.add_self_interaction('tip')
         pm.add_self_interaction('sheet')
 
-        # Cross Interactions (LJ Mixing)
-        pm.add_cross_interaction('sub', 'tip', interaction_type='lj/cut')
-        pm.add_cross_interaction('sub', 'sheet', interaction_type='lj/cut')
-        pm.add_cross_interaction('tip', 'sheet', interaction_type='lj/cut')
+        # Cross Interactions (LJ Mixing between components)
+        pm.add_cross_interaction('sub', 'tip')
+        pm.add_cross_interaction('sub', 'sheet')
+        pm.add_cross_interaction('tip', 'sheet')
+        
+        # Interlayer interactions for multi-layer sheets
+        if sheet_needs_layer_types and n_sheet_layers > 1:
+            pm.add_interlayer_interaction('sheet')
 
+        # Write the potential file
         pm.write_file(self.output_dir / "lammps" / "system.in.settings")
 
-        # Store group ID strings
+        # Store group ID strings for LAMMPS grouping
         self.groups['sub_types'] = pm.get_group_string('sub')
         self.groups['tip_types'] = pm.get_group_string('tip')
         self.groups['sheet_types'] = pm.get_group_string('sheet')
+        
+        # Store layer-specific groups if applicable
+        if sheet_needs_layer_types:
+            for layer in range(n_sheet_layers):
+                self.groups[f'sheet_l{layer+1}_types'] = pm.get_layer_group_string('sheet', layer)
 
         return pm
 
@@ -115,10 +153,10 @@ class AFMSimulation(BaseBuilder):
         """Generates the LAMMPS input scripts."""
         logger.info("Writing LAMMPS inputs...")
 
-        all_types = set()
-        for s in self.groups.values():
-            all_types.update(s.split())
-        total_types = len(all_types)
+        # Get total types from PotentialManager
+        total_types = self.pm.get_total_types() if self.pm else len(set(
+            t for s in self.groups.values() for t in s.split()
+        ))
 
         context = {
             'temp': self.config.general.temp,
@@ -144,14 +182,24 @@ class AFMSimulation(BaseBuilder):
             'tip_natypes': len(self.groups['tip_types'].split()),
 
             'damp_ev': self.config.tip.dspring / 0.016,
-            'spring_ev': self.config.tip.cspring / 16.02,
+            'spring_ev': (self.config.general.driving_spring or 8.0) / 16.02,  # N/m to eV/Å²
             'tipps': self.config.tip.s / 100,
             'drive_method': self.config.settings.simulation.drive_method,
             'virtual_offset': 10.0, 
             'virtual_atom_type': total_types + 1,
             'run_steps': self.config.settings.simulation.slide_run_steps,
             'results_freq': self.config.settings.output.results_frequency,
-            'dump_freq': self.config.settings.output.dump_frequency['slide']
+            'dump_freq': self.config.settings.output.dump_frequency['slide'],
+            
+            # Multi-layer sheet context
+            'n_sheet_layers': max(self.config.sheet.layers) if self.config.sheet.layers else 1,
+            'lat_c': self.lat_c,  # Calculated during build
+            'tip_radius': self.config.tip.r,  # From config
+            'sheet_dims': self.sheet_dims,  # Actual dimensions from build
+            
+            # Thermostat settings
+            'thermostat_type': self.config.settings.thermostat.type,
+            'use_langevin': self.config.settings.thermostat.type == 'langevin',
         }
 
         init_script = self.render_template("afm/system_init.lmp", context)
