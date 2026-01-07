@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Union
 from importlib import resources
 
 from jinja2 import Environment, BaseLoader, TemplateNotFound
-
+import shutil
 from FrictionSim2D.interfaces.atomsk import AtomskWrapper
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,85 @@ class SimulationBase(ABC):
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content)
         return full_path
+
+    def add_to_provenance(self, file_path: Union[str, Path], category: str = 'auto') -> Path:
+        """Add a file to the provenance folder for reproducibility tracking.
+        
+        Call this when using a CIF or potential file during simulation setup.
+        
+        Args:
+            file_path: Path to the file to add
+            category: 'cif', 'potential', or 'auto' (detect by extension)
+            
+        Returns:
+            Path to the copied file in provenance folder
+        """
+        file_path = Path(file_path)
+        if not file_path.exists():
+            logger.warning(f"Cannot add to provenance, file not found: {file_path}")
+            return None
+        
+        prov_dir = self.output_dir / 'provenance'
+        
+        # Auto-detect category
+        if category == 'auto':
+            ext = file_path.suffix.lower()
+            if ext == '.cif':
+                category = 'cif'
+            elif ext in ('.sw', '.tersoff', '.eam', '.meam', '.rebo', '.airebo'):
+                category = 'potential'
+            else:
+                category = 'other'
+        
+        # Determine destination
+        if category == 'cif':
+            dest_dir = prov_dir / 'cif'
+        elif category == 'potential':
+            dest_dir = prov_dir / 'potentials'
+        else:
+            dest_dir = prov_dir
+        
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = dest_dir / file_path.name
+        
+        # Only copy if not already there
+        if not dest_path.exists():
+            shutil.copy2(file_path, dest_path)
+            logger.debug(f"Added to provenance: {file_path.name}")
+        
+        return dest_path
+    
+    def init_provenance(self, 
+                        config_path: Union[str, Path] = None,
+                        settings_path: Union[str, Path] = None,
+                        materials_list_path: Union[str, Path] = None) -> Path:
+        """Initialize provenance folder with config files.
+        
+        Call this once at the start of simulation setup. CIF and potential
+        files are added later via add_to_provenance() when they're used.
+        
+        Args:
+            config_path: Path to the config.ini file
+            settings_path: Path to settings.yaml (optional)
+            materials_list_path: Path to materials list file (optional)
+            
+        Returns:
+            Path to the provenance directory
+        """
+        prov_dir = self.output_dir / 'provenance'
+        prov_dir.mkdir(parents=True, exist_ok=True)
+        
+        if config_path and Path(config_path).exists():
+            shutil.copy2(config_path, prov_dir / Path(config_path).name)
+        
+        if settings_path and Path(settings_path).exists():
+            shutil.copy2(settings_path, prov_dir / 'settings.yaml')
+        
+        if materials_list_path and Path(materials_list_path).exists():
+            shutil.copy2(materials_list_path, prov_dir / Path(materials_list_path).name)
+        
+        logger.info(f"Initialized provenance folder: {prov_dir}")
+        return prov_dir
 
     @abstractmethod
     def build(self) -> None:

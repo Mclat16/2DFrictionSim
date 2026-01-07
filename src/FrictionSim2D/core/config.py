@@ -68,11 +68,25 @@ class PotentialSettings(BaseModel):
     model_config = {'populate_by_name': True}
 
 class AiidaSettings(BaseModel):
-    lammps_code_label: str 
-    postprocess_code_label: str
-    postprocess_script_path: str
-    num_cpus: int
-    walltime_seconds: int
+    """AiiDA and HPC workflow settings."""
+    # Code labels (for online AiiDA workflow)
+    lammps_code_label: str = 'lammps@my_hpc'
+    postprocess_code_label: str = 'python@my_hpc'
+    postprocess_script_path: str = ''
+    
+    # Resource allocation
+    num_cpus: int = 32
+    memory_gb: int = 8
+    walltime_seconds: int = 72000
+    
+    # Scheduler settings (for offline HPC workflow)
+    scheduler_type: Literal['pbs', 'slurm'] = 'pbs'
+    queue: str = 'normal'
+    account: str = ''
+    max_array_size: int = 300
+    
+    # Environment modules to load on HPC
+    modules: List[str] = Field(default_factory=lambda: ['lammps/2023'])
     
 class GlobalSettings(BaseModel):
     """Represents the full structure of settings.yaml / settings_default.yaml."""

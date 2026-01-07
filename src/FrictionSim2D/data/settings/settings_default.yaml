@@ -54,10 +54,25 @@ quench:
   run_local: true               # Whether to run quenching locally (true/false)
   n_procs: 16                     # Number of processors to use if not running locally
 
-# AiiDA settings
+# AiiDA / HPC settings
 aiida:
+  # Code labels (for online AiiDA workflow)
   lammps_code_label: 'lammps@my_hpc'
   postprocess_code_label: 'python@my_hpc'
   postprocess_script_path: '/path/to/your/read_data.py'
-  num_cpus: 32
-  walltime_seconds: 72000 # 20 hours
+  
+  # Resource allocation
+  num_cpus: 32                    # CPUs per simulation
+  memory_gb: 8                    # Memory per simulation in GB
+  walltime_seconds: 72000         # 20 hours per simulation
+  
+  # Scheduler settings (for offline HPC workflow)
+  scheduler_type: 'pbs'           # 'pbs' or 'slurm'
+  queue: 'normal'                 # PBS queue name (or SLURM partition)
+  account: ''                     # Account/project to charge (optional)
+  max_array_size: 300             # Maximum simulations per array job
+  
+  # Environment modules to load on HPC
+  modules:
+    - 'lammps/2023'
+    # - 'python/3.10'

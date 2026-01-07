@@ -67,6 +67,9 @@ class AFMSimulation(SimulationBase):
         shared_build_dir = self.base_output_dir / "build"
         shared_build_dir.mkdir(parents=True, exist_ok=True)
         
+        # Initialize provenance folder
+        self._init_provenance()
+        
         # 1. Build common components ONCE
         self._build_common_components(shared_build_dir)
         
@@ -116,6 +119,49 @@ class AFMSimulation(SimulationBase):
             self.write_inputs()
         
         logger.info("Build complete for all layer configurations.")
+
+    def _init_provenance(self) -> None:
+        """Initialize provenance folder and collect input files."""
+        from FrictionSim2D.core.utils import get_material_path, get_potential_path
+        
+        # Initialize the provenance folder
+        prov_dir = self.base_output_dir / 'provenance'
+        prov_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Collect CIF files for all components
+        for component_name, config in [
+            ('sheet', self.config.sheet),
+            ('tip', self.config.tip),
+            ('sub', self.config.sub)
+        ]:
+            if hasattr(config, 'cif_path') and config.cif_path:
+                self.add_to_provenance(config.cif_path, 'cif')
+            elif hasattr(config, 'mat') and config.mat:
+                # Try to find CIF file for this material
+                try:
+                    cif_path = get_material_path(config.mat, 'cif')
+                    if cif_path:
+                        self.add_to_provenance(cif_path, 'cif')
+                except Exception:
+                    pass
+        
+        # Collect potential files for all components
+        for component_name, config in [
+            ('sheet', self.config.sheet),
+            ('tip', self.config.tip),
+            ('sub', self.config.sub)
+        ]:
+            if hasattr(config, 'pot_path') and config.pot_path:
+                self.add_to_provenance(config.pot_path, 'potential')
+            elif hasattr(config, 'pot') and config.pot:
+                try:
+                    pot_path = get_potential_path(config.pot)
+                    if pot_path:
+                        self.add_to_provenance(pot_path, 'potential')
+                except Exception:
+                    pass
+        
+        logger.info(f"Initialized provenance folder: {prov_dir}")
 
     def _build_common_components(self, build_dir: Path) -> None:
         """Builds tip, substrate, and monolayer (components shared across layers)."""

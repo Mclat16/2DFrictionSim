@@ -30,6 +30,13 @@ requirements:
     - pyyaml >=6.0
     - jinja2 >=3.1
     - pydantic >=2.0
+    # --- Optional: AiiDA dependencies ---
+    # Uncomment these for AiiDA workflow support:
+    # - aiida-core >=2.0
+    # - postgresql
+    # - rabbitmq-server
+    # - click >=8.0
+    # - pandas >=1.5
 
 test:
   imports:

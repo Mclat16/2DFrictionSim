@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 # Standard 4-layer model configuration
 N_LAYERS = 4
 
-
 class SheetOnSheetSimulation(SimulationBase):
     """Builder for Sheet-on-Sheet friction simulations.
     
@@ -51,6 +50,9 @@ class SheetOnSheetSimulation(SimulationBase):
         logger.info("Starting Sheet-vs-Sheet Build (4-layer model)...")
         self._create_directories()
         build_dir = self.output_dir / "build"
+        
+        # Initialize provenance folder
+        self._init_provenance()
         
         # Build the 4-layer sheet stack
         logger.info(f"Building {N_LAYERS}-layer sheet stack...")
@@ -78,6 +80,39 @@ class SheetOnSheetSimulation(SimulationBase):
         self.write_inputs()
         
         logger.info("Build complete.")
+
+    def _init_provenance(self) -> None:
+        """Initialize provenance folder and collect input files."""
+        from FrictionSim2D.core.utils import get_material_path, get_potential_path
+        
+        # Initialize the provenance folder
+        prov_dir = self.output_dir / 'provenance'
+        prov_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Collect CIF file for sheet
+        config = self.config.sheet
+        if hasattr(config, 'cif_path') and config.cif_path:
+            self.add_to_provenance(config.cif_path, 'cif')
+        elif hasattr(config, 'mat') and config.mat:
+            try:
+                cif_path = get_material_path(config.mat, 'cif')
+                if cif_path:
+                    self.add_to_provenance(cif_path, 'cif')
+            except Exception:
+                pass
+        
+        # Collect potential file for sheet
+        if hasattr(config, 'pot_path') and config.pot_path:
+            self.add_to_provenance(config.pot_path, 'potential')
+        elif hasattr(config, 'pot') and config.pot:
+            try:
+                pot_path = get_potential_path(config.pot)
+                if pot_path:
+                    self.add_to_provenance(pot_path, 'potential')
+            except Exception:
+                pass
+        
+        logger.info(f"Initialized provenance folder: {prov_dir}")
 
     def _generate_potentials(self) -> PotentialManager:
         """Configures potential file for 4-layer sheet-on-sheet simulation.
