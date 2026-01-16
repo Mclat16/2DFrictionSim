@@ -27,22 +27,11 @@ from src.core.utils import (
     cifread, count_atomtypes, get_material_path, get_model_dimensions,
     renumber_atom_types, check_potential_cif_compatibility
 )
+
 from src.interfaces.atomsk import AtomskWrapper
+from src.interfaces.lammps import run_lammps_commands
 
 logger = logging.getLogger(__name__)
-
-def run_lammps_commands(commands: List[str]) -> None:
-    """Runs a list of LAMMPS commands using the Python interface."""
-    lmp = lammps(cmdargs=["-log", "none", "-screen", "none", "-nocite"])
-    try:
-        for cmd in commands:
-            lmp.command(cmd)
-    except Exception as e:
-        logger.error(f"LAMMPS execution failed: {e}")
-        raise
-    finally:
-        lmp.close()
-
 
 def calculate_layer_shifts(mat_name: str, dims: Dict[str, float]) -> Tuple[float, float]:
     """Calculates stacking shifts based on material type.

@@ -6,42 +6,16 @@ required by all specific simulation types (AFM, Sheet-on-Sheet, etc.).
 """
 
 import logging
-from abc import ABC, abstractmethod
+from abc import ABC
 from pathlib import Path
 from typing import Any, Dict, List, Union
-from importlib import resources
-
-from jinja2 import Environment, BaseLoader, TemplateNotFound
 import shutil
 from src.interfaces.atomsk import AtomskWrapper
+from src.interfaces.jinja import PackageLoader
+
 
 logger = logging.getLogger(__name__)
 
-
-class PackageLoader(BaseLoader):
-    """Jinja2 loader that works with importlib.resources Traversable objects.
-
-    Allows Jinja2 to load templates from package resources instead of the
-    filesystem, supporting both installed packages and development mode.
-    """
-    
-    def __init__(self, package_name: str):
-        self._package = resources.files(package_name)
-    
-    def get_source(self, environment, template):
-        try:
-            parts = template.split('/')
-            current = self._package
-            for part in parts:
-                current = current.joinpath(part)
-            
-            if not current.is_file():
-                raise TemplateNotFound(template)
-            
-            source = current.read_text(encoding='utf-8')
-            return source, template, lambda: True
-        except (FileNotFoundError, TypeError):
-            raise TemplateNotFound(template)
 
 class SimulationBase(ABC):
     """Abstract base class for simulation setup.
@@ -198,21 +172,3 @@ class SimulationBase(ABC):
         
         logger.info(f"Initialized provenance folder: {prov_dir}")
         return prov_dir
-
-    @abstractmethod
-    def build(self) -> None:
-        """Orchestrate the construction of atomic structures.
-
-        Subclasses must implement this to create all necessary structures
-        and prepare the simulation.
-        """
-        pass
-
-    @abstractmethod
-    def write_inputs(self) -> None:
-        """Generate the LAMMPS input scripts and potential files.
-
-        Subclasses must implement this to create all necessary LAMMPS
-        configuration files and scripts.
-        """
-        pass

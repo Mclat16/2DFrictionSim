@@ -219,8 +219,6 @@ def load_settings() -> GlobalSettings:
                     return GlobalSettings(**user_settings)
     except (FileNotFoundError, AttributeError):
         pass
-
-    # Return defaults if no settings file or empty file
     return GlobalSettings()
 
 

@@ -31,7 +31,6 @@ from src.core.utils import (
 )
 
 __all__ = [
-    # Config
     "ComponentConfig",
     "TipConfig",
     "SubstrateConfig",
@@ -42,11 +41,8 @@ __all__ = [
     "GlobalSettings",
     "load_settings",
     "parse_config",
-    # Potential
     "PotentialManager",
-    # Base
     "SimulationBase",
-    # Utils
     "cifread",
     "count_atomtypes",
     "lj_params",

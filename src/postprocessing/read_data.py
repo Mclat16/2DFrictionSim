@@ -1,3 +1,14 @@
+"""Data reading and processing for friction simulation results.
+
+This module provides tools for reading and parsing friction simulation output
+files organized in a directory structure. It extracts metadata from file names
+and paths, reads time-series data, and generates structured JSON exports for
+analysis and visualization.
+
+The DataReader class handles both AFM (tip-on-substrate) and sheet-on-sheet
+simulation formats, detecting the simulation type from directory patterns and
+filename conventions.
+"""
 import os
 import re
 import json
@@ -33,23 +44,46 @@ class DataReader:
         # Read the data and populate the dictionaries and metadata
         self.time_series, self.incomplete_files, self.incomplete_materials, self.metadata, self.ntimestep = self.read_data()
 
-    def _get_output_path(self, filename):
-        """Constructs the full path for an output file in the designated output directory."""
+    def _get_output_path(self, filename: str) -> str:
+        """Construct the full path for an output file in the designated output directory.
+
+        Args:
+            filename: Name of the output file to construct path for.
+
+        Returns:
+            Full path to the output file in the outputs directory.
+        """
         return os.path.join(self.output_dir, filename)
 
-    def get_inputs(self, results_dir):
-        """Defines the settings for data processing."""
+    def get_inputs(self, results_dir: str) -> dict:
+        """Define the settings for data processing.
+
+        Args:
+            results_dir: Directory containing simulation results.
+
+        Returns:
+            Dictionary with settings including field names and results directory path.
+        """
         settings = {
             'resultsdir': results_dir,
             'fields': ['time', 'nf', 'lfx', 'lfy', 'comx', 'comy', 'comz', 'tipx', 'tipy', 'tipz'],
         }
         return settings
 
-    def read_data(self):
-        """
-        Walks through the results directory, reads all simulation data,
-        and populates the instance's data structures using a two-pass approach
-        to dynamically determine the correct number of timesteps for a complete file.
+    def read_data(self) -> tuple:
+        """Read and parse all simulation data files in the results directory.
+
+        Performs a two-pass directory walk to dynamically determine the correct
+        number of timesteps for a complete file, then processes only complete files.
+        Detects simulation type (AFM vs sheet-on-sheet) from directory patterns.
+
+        Returns:
+            Tuple of (time_series, incomplete_files, incomplete_materials, metadata, ntimestep):
+            - time_series: List of timesteps from simulation data.
+            - incomplete_files: Dict mapping size to lists of incomplete file paths.
+            - incomplete_materials: Dict mapping size to sets of incomplete materials.
+            - metadata: Dict containing extracted metadata (materials, forces, angles, etc.).
+            - ntimestep: Number of timesteps in a complete file.
         """
         results_dir = self.settings['resultsdir']
         
@@ -256,8 +290,13 @@ class DataReader:
 
         return time_series, incomplete_files, incomplete_materials, final_metadata, ntimestep
 
-    def export_full_data_to_json(self):
-        """Exports the full time-series data to JSON files, one for each 'size'."""
+    def export_full_data_to_json(self) -> None:
+        """Export full time-series data to JSON files organized by simulation size.
+
+        Creates one JSON file per unique simulation size, containing all materials,
+        substrates, and parameter combinations for that size. Each file includes
+        both the time-series data and associated metadata.
+        """
         class NpEncoder(json.JSONEncoder):
             def default(self, obj):
                 if isinstance(obj, np.integer): return int(obj)
@@ -302,8 +341,15 @@ class DataReader:
                 json.dump(output_with_metadata, f, cls=NpEncoder)
             print(f"Full time-series data for size {size_key} exported to {full_data_output_path}")
 
-    def export_issue_reports(self):
-        """Exports reports on incomplete files and materials to text files."""
+    def export_issue_reports(self) -> None:
+        """Export reports of incomplete files and materials to text files.
+
+        Generates two types of reports per simulation size:
+        1. List of files with incomplete data (fewer than expected timesteps).
+        2. List of materials with incomplete data.
+
+        Files are written to the output directory with size-specific names.
+        """
         if self.incomplete_files:
             for size, files in self.incomplete_files.items():
                 filepath = self._get_output_path(f'incomplete_files_{size}.txt')
@@ -318,8 +364,14 @@ class DataReader:
                     f.write('\n'.join(sorted(list(materials))))
                 print(f"List of incomplete materials for size {size} saved to {filepath}")
 
-def main():
-    """Main function to parse arguments and run the data processing."""
+def main() -> None:
+    """Main entry point for data processing command-line interface.
+
+    Parses command-line arguments to determine the results directory and
+    execution mode. Currently supports the 'export' command which exports
+    all time-series data to JSON files. Always generates reports on
+    incomplete data regardless of command.
+    """
     parser = argparse.ArgumentParser(description="Read and process friction simulation data, exporting full data and rankings to JSON.")
     subparsers = parser.add_subparsers(dest='command', required=True, help='Available commands')
 

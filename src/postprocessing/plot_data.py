@@ -1,3 +1,14 @@
+"""Data visualization and plotting for friction simulation results.
+
+This module provides tools for loading, processing, and visualizing friction
+simulation data from JSON files. It supports creating various plots including
+time-series friction data, statistical summaries, and material-specific analyses.
+
+The Plotter class handles:
+- Discovery and loading of data files organized by size and simulation type
+- Metadata extraction and material classification
+- Generation of publication-quality figures in multiple formats
+"""
 import json
 import argparse
 import os
@@ -9,7 +20,31 @@ import glob
 import matplotlib.pyplot as plt
 
 class Plotter:
-    def __init__(self, data_dirs, labels, output_dir):
+    """Plotter for friction simulation data with multi-dataset support.
+
+    Loads and visualizes friction simulation results from multiple datasets,
+    enabling comparative analysis across different simulation parameters or
+    conditions. Supports automatic discovery of data files, metadata aggregation,
+    and generation of various plot types.
+
+    Attributes:
+        data_dirs: List of directories containing simulation results.
+        labels: List of labels for each dataset (for plot legends).
+        output_dir: Directory where generated plots will be saved.
+        time_step_fs: Conversion factor from simulation timesteps to femtoseconds.
+        figure_size: Tuple of (width, height) for generated figures.
+        plot_style: Style for line plots (e.g., 'line', 'scatter').
+        metadata: Aggregated metadata from all loaded data files.
+        material_type_map: Mapping from material IDs to material types.
+    """
+    def __init__(self, data_dirs: list, labels: list, output_dir: str) -> None:
+        """Initialize the Plotter with data directories and output configuration.
+
+        Args:
+            data_dirs: List of directories containing simulation result files.
+            labels: List of labels corresponding to each data directory.
+            output_dir: Directory where plots will be saved.
+        """
         self.data_dirs = data_dirs
         self.labels = labels
         self.output_dir = output_dir
@@ -29,8 +64,16 @@ class Plotter:
         self._load_all_metadata()
         self._create_material_type_map()
 
-    def _create_material_type_map(self):
-        """Creates a map from material_id to material_type from the combined metadata."""
+    def _create_material_type_map(self) -> None:
+        """Create a mapping from material ID to material type.
+
+        Processes the 'material_types' metadata field and builds a dictionary
+        that maps individual material IDs to their type classification
+        (e.g., 'h_type' for hexagonal, 'p_type' for puckered).
+
+        Issues a warning if material types are not found in metadata, which may
+        affect functionality of type-based plotting features.
+        """
         material_types_dict = self.metadata.get('material_types')
 
         if isinstance(material_types_dict, dict):
@@ -42,9 +85,16 @@ class Plotter:
         else:
             print("Warning: 'material_types' not found in combined metadata. Plotting by type may fail.")
 
-    def _deep_merge_dict(self, d1, d2):
-        """
-        Recursively merges dictionary d2 into d1. Overwrites values, updates lists, and merges dicts.
+    def _deep_merge_dict(self, d1: dict, d2: dict) -> None:
+        """Recursively merge dictionary d2 into d1 in place.
+
+        Handles merging of nested dictionaries, lists, and scalar values.
+        For lists, values from d2 are extended into d1. For dictionaries,
+        recursive merging is applied. For other types, d2 values overwrite d1.
+
+        Args:
+            d1: Target dictionary to merge into (modified in place).
+            d2: Source dictionary to merge from (not modified).
         """
         for k, v in d2.items():
             if k in d1 and isinstance(d1[k], dict) and isinstance(v, dict):
@@ -54,8 +104,14 @@ class Plotter:
             else:
                 d1[k] = v
 
-    def _discover_data_files(self):
-        """Finds all output_full_*.json files in each data directory."""
+    def _discover_data_files(self) -> None:
+        """Discover and catalog all output data files across configured directories.
+
+        Searches for files matching the pattern 'output_full_*.json' in the outputs
+        subdirectory of each data directory. Maintains a mapping of labels and file
+        keys to full file paths for later loading. Issues warnings if directories
+        or expected files are not found.
+        """
         for label, data_dir in zip(self.labels, self.data_dirs):
             # Data is expected to be in an 'outputs' subdirectory based on the read_data.py script
             search_dir = os.path.join(data_dir, 'outputs')
@@ -77,8 +133,13 @@ class Plotter:
             if not self.full_data_files[label]:
                 print(f"Warning: No 'output_full_*.json' files found for label '{label}' in the searched directory: {search_dir}")
 
-    def _load_all_metadata(self):
-        """Loads and merges metadata from ALL available data files."""
+    def _load_all_metadata(self) -> None:
+        """Load and merge metadata from all available data files.
+
+        Iterates through all discovered files and loads their metadata sections,
+        then deep-merges them into a single consolidated metadata dictionary.
+        This allows querying across multiple datasets as a unified collection.
+        """
         # print("Loading and merging metadata from all data files...")
         for label in self.labels:
             if not self.full_data_files[label]:
@@ -89,8 +150,19 @@ class Plotter:
                     self._deep_merge_dict(self.metadata, metadata)
         # print("Metadata loading and merging complete.")
 
-    def _load_full_data(self, label, file_key):
-        """Loads a single data file and returns (results, metadata)."""
+    def _load_full_data(self, label: str, file_key: str) -> tuple:
+        """Load a single data file and extract its results and metadata.
+
+        Args:
+            label: Dataset label corresponding to the data directory.
+            file_key: File key identifier matching the pattern in output filename.
+
+        Returns:
+            Tuple of (results, metadata):
+            - results: Dict containing simulation data organized hierarchically.
+            - metadata: Dict containing file metadata (materials, forces, etc.).
+            Returns (None, None) if file cannot be found or parsed.
+        """
         file_path = self.full_data_files.get(label, {}).get(file_key)
         if not file_path:
             print(f"Warning: No data file found for label '{label}' and file_key '{file_key}'")
@@ -106,11 +178,20 @@ class Plotter:
             print(f"Error loading data from {file_path}: {e}")
             return None, None
 
-    def _extract_all_runs(self, label, file_key):
-        """
-        Recursively traverses the results structure for a single file
-        and yields a dictionary for each individual simulation run found.
-        Each dictionary contains the parsed parameters and the processed DataFrame.
+    def _extract_all_runs(self, label: str, file_key: str):
+        """Extract individual simulation runs from a data file as iterable.
+
+        Recursively traverses the hierarchical results structure and yields
+        a dictionary for each complete simulation run found. Each yielded
+        dictionary contains parsed parameters (material, size, force, angle, etc.)
+        and the corresponding DataFrame with derived columns added.
+
+        Args:
+            label: Dataset label corresponding to the data directory.
+            file_key: File key identifier matching the pattern in output filename.
+
+        Yields:
+            Dict containing run parameters and 'df' key with processed DataFrame.
         """
         results, _ = self._load_full_data(label, file_key)
         if not results:
