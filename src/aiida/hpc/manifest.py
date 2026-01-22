@@ -350,7 +350,7 @@ class JobManifest:
         )
         
         # Pattern to extract simulation parameters from path
-        # Example: afm/h-MoS2/100x_100y/sub_aSi_tip_Si_r25/K300/l_1/
+        # Example: afm/h-MoS2/100x_100y/sub_aSi_tip_Si_r25/K300/
         layer_pattern = re.compile(r'l[_]?(\d+)')
         
         # Find all simulation directories

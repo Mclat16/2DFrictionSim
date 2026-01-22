@@ -25,7 +25,7 @@ def run_lammps_commands(commands: List[str]) -> None:
         for cmd in commands:
             lmp.command(cmd)
     except Exception as e:
-        logger.error(f"LAMMPS execution failed: {e}")
+        logger.error("LAMMPS execution failed: %s", e)
         raise
     finally:
         lmp.close()

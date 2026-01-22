@@ -1,0 +1,20 @@
+# LAMMPS commands for building substrate slab
+# Generated from template: build_substrate.lmp
+
+clear
+units metal
+atom_style atomic
+boundary p p p
+
+read_data {{ base_lmp }}
+
+region box block {{ box_xlo }} {{ box_xhi }} {{ box_ylo }} {{ box_yhi }} {{ box_zlo }} {{ target_z }}
+
+group sub region box
+group delete_atoms subtract all sub
+delete_atoms group delete_atoms
+
+change_box all x final {{ box_xlo }} {{ box_xhi }} y final {{ box_ylo }} {{ box_yhi }} z final -5 {{ target_z }}
+reset_atoms id
+
+write_data {{ output_path }}

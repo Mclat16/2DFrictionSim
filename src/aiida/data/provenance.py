@@ -5,9 +5,13 @@ This node stores the files needed to reproduce a simulation:
 - CIF files (crystal structures)
 - Potential files (.sw, .tersoff, etc.)
 - Materials list files
+
+The provenance is tracked with metadata that ties files to their usage components
+(e.g., which potential is used for the tip, which CIF for the substrate).
 """
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from aiida.orm import Data
@@ -30,57 +34,101 @@ class FrictionProvenanceData(Data):
                 material.sw
                 ...
     """
-    
+
     def __init__(self, **kwargs):
         """Initialize the provenance data node."""
         super().__init__(**kwargs)
-    
+
     # =========================================================================
     # PROPERTIES
     # =========================================================================
-    
+
     @property
     def simulation_type(self) -> str:
         """Type of simulation ('afm' or 'sheetonsheet')."""
         return self.base.attributes.get('simulation_type', 'afm')
-    
+
     @simulation_type.setter
     def simulation_type(self, value: str):
         self.base.attributes.set('simulation_type', value)
-    
+
     @property
     def config_filename(self) -> str:
         """Original filename of config file."""
         return self.base.attributes.get('config_filename', 'config.ini')
-    
+
     @property
     def materials_list(self) -> List[str]:
         """List of materials if a materials_list file was used."""
         return self.base.attributes.get('materials_list', [])
-    
+
     @property
     def cif_files(self) -> Dict[str, str]:
         """Dictionary mapping CIF filenames to their checksums."""
         return self.base.attributes.get('cif_files', {})
-    
+
     @property
     def potential_files(self) -> Dict[str, str]:
         """Dictionary mapping potential filenames to their checksums."""
         return self.base.attributes.get('potential_files', {})
-    
+
+    @property
+    def file_manifest(self) -> Dict[str, Any]:
+        """Component-to-file mapping from the provenance manifest.
+        
+        Returns a structured mapping like:
+        {
+            'tip': {'potential': 'Au.sw', 'original_path': '...'},
+            'substrate': {'cif': 'MoS2.cif', 'original_path': '...'}
+        }
+        """
+        return self.base.attributes.get('file_manifest', {})
+
     @property
     def file_count(self) -> int:
         """Total number of stored files."""
         return len(self.cif_files) + len(self.potential_files)
-    
+
     # =========================================================================
     # FILE METHODS
     # =========================================================================
-    
+
     def _compute_checksum(self, content: bytes) -> str:
         """Compute SHA-256 checksum of file content."""
         return hashlib.sha256(content).hexdigest()
-    
+
+    def _load_manifest(self, manifest_path: Path) -> Dict[str, Any]:
+        """Load and parse the provenance manifest.json file.
+        
+        Returns a dict mapping components to their files:
+        {
+            'tip': {'potential': 'Au.sw', 'original_path': '...', 'checksum': '...'},
+            'substrate': {'cif': 'MoS2.cif', 'original_path': '...'}
+        }
+        """
+        if not manifest_path.exists():
+            return {}
+
+        manifest = json.loads(manifest_path.read_text())
+        component_map = {}
+
+        for file_entry in manifest.get('files', []):
+            component = file_entry.get('component')
+            if not component:
+                continue
+            if component not in component_map:
+                component_map[component] = {}
+
+            category = file_entry.get('category')
+            component_map[component][category] = {
+                'filename': file_entry.get('filename'),
+                'original_path': file_entry.get('original_path'),
+                'checksum': file_entry.get('checksum'),
+                'added_at': file_entry.get('added_at')
+            }
+
+        return component_map
+
     def add_file(self, filepath: Path, category: str) -> str:
         """Add a file to the provenance store.
         
@@ -101,7 +149,7 @@ class FrictionProvenanceData(Data):
         self.base.repository.put_object_from_filelike(
             filepath.open('rb'), repo_path
         )
-        
+
         # Update registry
         if category == 'cif':
             files = dict(self.cif_files)
@@ -111,20 +159,20 @@ class FrictionProvenanceData(Data):
             files = dict(self.potential_files)
             files[filename] = checksum
             self.base.attributes.set('potential_files', files)
-        
+
         return checksum
-    
+
     def get_file_content(self, filename: str, category: str) -> bytes:
         """Get the content of a stored file."""
         repo_path = f'{category}/{filename}'
         with self.base.repository.open(repo_path, 'rb') as f:
             return f.read()
-    
+
     def export_to_directory(self, output_dir: Path) -> Dict[str, Path]:
         """Export all stored files to recreate the provenance folder."""
         output_dir = Path(output_dir)
         exported = {}
-        
+
         # Export CIF files
         cif_dir = output_dir / 'cif'
         cif_dir.mkdir(parents=True, exist_ok=True)
@@ -133,7 +181,7 @@ class FrictionProvenanceData(Data):
             out_path = cif_dir / filename
             out_path.write_bytes(content)
             exported[filename] = out_path
-        
+
         # Export potential files
         pot_dir = output_dir / 'potentials'
         pot_dir.mkdir(parents=True, exist_ok=True)
@@ -142,18 +190,21 @@ class FrictionProvenanceData(Data):
             out_path = pot_dir / filename
             out_path.write_bytes(content)
             exported[filename] = out_path
-        
+
         return exported
-    
+
     # =========================================================================
     # FACTORY METHOD
     # =========================================================================
-    
+
     @classmethod
     def from_provenance_folder(cls, 
                                 provenance_dir: Path,
                                 simulation_type: str = 'afm') -> 'FrictionProvenanceData':
         """Create provenance node from a provenance folder.
+        
+        Reads the manifest.json to track component-to-file mappings, which enables
+        tracing of which potential/CIF is used for which component (tip, substrate, etc.).
         
         Args:
             provenance_dir: Path to the provenance folder created by FrictionSim2D
@@ -165,19 +216,24 @@ class FrictionProvenanceData(Data):
         provenance_dir = Path(provenance_dir)
         node = cls()
         node.simulation_type = simulation_type
-        
+
+        # Load manifest to get component-to-file mappings
+        manifest_path = provenance_dir / 'manifest.json'
+        component_map = node._load_manifest(manifest_path)
+        node.base.attributes.set('file_manifest', component_map)
+
         # Find and store config file
         config_files = list(provenance_dir.glob('*.ini'))
         if config_files:
             config_path = config_files[0]
             node.base.attributes.set('config_filename', config_path.name)
             node.add_file(config_path, 'config')
-        
+
         # Store settings.yaml if present
         settings_path = provenance_dir / 'settings.yaml'
         if settings_path.exists():
             node.add_file(settings_path, 'config')
-        
+
         # Read materials list if present
         for list_file in provenance_dir.glob('*.txt'):
             if 'material' in list_file.name.lower():
@@ -189,22 +245,22 @@ class FrictionProvenanceData(Data):
                 node.base.attributes.set('materials_list', materials)
                 node.add_file(list_file, 'config')
                 break
-        
+
         # Add CIF files
         cif_dir = provenance_dir / 'cif'
         if cif_dir.exists():
             for cif_file in cif_dir.glob('*.cif'):
                 node.add_file(cif_file, 'cif')
-        
-        # Add potential files
+
+        # Add potential files (may be symlinks, that's ok - AiiDA follows them)
         pot_dir = provenance_dir / 'potentials'
         if pot_dir.exists():
             for pot_file in pot_dir.iterdir():
                 if pot_file.is_file():
                     node.add_file(pot_file, 'potential')
-        
+
         return node
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Export metadata as a dictionary."""
         return {
@@ -216,7 +272,7 @@ class FrictionProvenanceData(Data):
             'potential_files': self.potential_files,
             'file_count': self.file_count,
         }
-    
+
     def __repr__(self) -> str:
         n_materials = len(self.materials_list) if self.materials_list else 0
         return (

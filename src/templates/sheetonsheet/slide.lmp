@@ -1,6 +1,13 @@
 # LAMMPS Input Script for Sheet-vs-Sheet Sliding
 
 # Variable Definitions
+{% if scan_speeds is iterable and scan_speeds is not string %}
+variable        speed index {{ scan_speeds | join(' ') }}
+label           speed_loop
+{% else %}
+variable        speed equal {{ scan_speeds }}
+{% endif %}
+
 {% if pressures is iterable and pressures is not string %}
 variable        pressure index {{ pressures | join(' ') }}
 label           force_loop
@@ -123,7 +130,7 @@ fix             spr layer_4 spring couple virtual {{ driving_spring_ev }} 0.0 0.
 variable        speed_x equal cos(v_a*PI/180)
 variable        speed_y equal sin(v_a*PI/180)
 
-fix             move_virtual virtual move linear $({{ scan_speed_norm }}*v_speed_x) $({{ scan_speed_norm }}*v_speed_y) 0.0
+fix             move_virtual virtual move linear $(v_speed*v_speed_x) $(v_speed*v_speed_y) 0.0
 
 # Output
 fix             fc_ave all ave/time 1 1000 {{ results_freq }} v_xfrict v_yfrict v_sx v_sy v_sz v_fx v_fy v_fz v_comx_ctop v_comy_ctop v_comz_ctop v_comx_cbot v_comy_cbot v_comz_cbot file {{ results_file_pattern }}
@@ -144,4 +151,16 @@ clear
 variable        a delete
 {% endif %}
 jump            SELF force_loop
+{% endif %}
+
+{% if scan_speeds is iterable and scan_speeds is not string %}
+next            speed
+clear
+{% if pressures is iterable and pressures is not string %}
+variable        pressure delete
+{% endif %}
+{% if angles is iterable and angles is not string %}
+variable        a delete
+{% endif %}
+jump            SELF speed_loop
 {% endif %}

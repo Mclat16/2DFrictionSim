@@ -2,13 +2,13 @@
 
 This module orchestrates the setup of a friction simulation between two
 2D material sheets. The standard model is a 4-layer stack:
-  - Layer 1: Fixed (bottom)
-  - Layer 2-3: Mobile with Langevin thermostat (friction interface)
-  - Layer 4: Rigid, driven by virtual atom (top)
+    - Layer 1: Fixed (bottom)
+    - Layer 2-3: Mobile with Langevin thermostat (friction interface)
+    - Layer 4: Rigid, driven by virtual atom (top)
 
 Interlayer interactions:
-  - Adjacent layers (1-2, 2-3, 3-4): Real LJ interactions
-  - Non-adjacent layers (1-3, 1-4, 2-4): Ghost interactions (prevent interpenetration)
+    - Adjacent layers (1-2, 2-3, 3-4): Real LJ interactions
+    - Non-adjacent layers (1-3, 1-4, 2-4): Ghost interactions (prevent interpenetration)
 """
 
 import logging
@@ -22,40 +22,41 @@ from src.builders import components
 
 logger = logging.getLogger(__name__)
 
-# Standard 4-layer model configuration
+# Standard 4-layer model configuration is hardcoded
 N_LAYERS = 4
 
 class SheetOnSheetSimulation(SimulationBase):
     """Builder for Sheet-on-Sheet friction simulations.
     
     Creates a 4-layer stack of the same 2D material:
-      - Layer 1: Fixed bottom layer
-      - Layer 2: Mobile (Langevin thermostat)
-      - Layer 3: Mobile (Langevin thermostat)  
-      - Layer 4: Driven top layer (rigid body)
+        - Layer 1: Fixed bottom layer
+        - Layer 2: Mobile (Langevin thermostat)
+        - Layer 3: Mobile (Langevin thermostat)  
+        - Layer 4: Driven top layer (rigid body)
     """
 
-    def __init__(self, config: SheetOnSheetSimulationConfig, output_dir: str):
-        super().__init__(config, output_dir)
+    def __init__(self, config: SheetOnSheetSimulationConfig, output_dir: str,
+                    config_path: Optional[str] = None):
+        super().__init__(config, output_dir, config_path=config_path)
         self.config: SheetOnSheetSimulationConfig = config
-        
-        # State
         self.structure_paths: Dict[str, Path] = {}
         self.z_positions: Dict[str, float] = {}
         self.groups: Dict[str, str] = {}
         self.pm: Optional[PotentialManager] = None
+        self.lat_c: Optional[float] = None
+        self.sheet_dims: Optional[Dict] = None
 
     def build(self) -> None:
         """Constructs the 4-layer sheet stack."""
         logger.info("Starting Sheet-vs-Sheet Build (4-layer model)...")
         self._create_directories()
+
         build_dir = self.output_dir / "build"
-        
-        # Initialize provenance folder
+        build_dir.mkdir(parents=True, exist_ok=True)
+
         self._init_provenance()
-        
-        # Build the 4-layer sheet stack
-        logger.info(f"Building {N_LAYERS}-layer sheet stack...")
+
+        logger.info("Building %d-layer sheet stack...", N_LAYERS)
         sheet_path, dims, lat_c = components.build_sheet(
             self.config.sheet, self.atomsk, build_dir,
             stack_if_multi=True, settings=self.config.settings,
@@ -63,56 +64,28 @@ class SheetOnSheetSimulation(SimulationBase):
         )
         self.structure_paths['sheet'] = sheet_path
 
-        # Generate Potentials
         self.pm = self._generate_potentials()
 
-        # Calculate Z positions for each layer
         self.z_positions['layer_1'] = 0.0
         self.z_positions['layer_2'] = lat_c
         self.z_positions['layer_3'] = 2 * lat_c
         self.z_positions['layer_4'] = 3 * lat_c
-        
-        # Store calculated values
+
         self.lat_c = lat_c
         self.sheet_dims = dims
-        
-        # Write LAMMPS inputs
+
         self.write_inputs()
-        
         logger.info("Build complete.")
 
     def _init_provenance(self) -> None:
         """Initialize provenance folder and collect input files."""
-        from src.core.utils import get_material_path, get_potential_path
-        
-        # Initialize the provenance folder
         prov_dir = self.output_dir / 'provenance'
         prov_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Collect CIF file for sheet
-        config = self.config.sheet
-        if hasattr(config, 'cif_path') and config.cif_path:
-            self.add_to_provenance(config.cif_path, 'cif')
-        elif hasattr(config, 'mat') and config.mat:
-            try:
-                cif_path = get_material_path(config.mat, 'cif')
-                if cif_path:
-                    self.add_to_provenance(cif_path, 'cif')
-            except Exception:
-                pass
-        
-        # Collect potential file for sheet
-        if hasattr(config, 'pot_path') and config.pot_path:
-            self.add_to_provenance(config.pot_path, 'potential')
-        elif hasattr(config, 'pot') and config.pot:
-            try:
-                pot_path = get_potential_path(config.pot)
-                if pot_path:
-                    self.add_to_provenance(pot_path, 'potential')
-            except Exception:
-                pass
-        
-        logger.info(f"Initialized provenance folder: {prov_dir}")
+        logger.debug("Provenance folder initialized at: %s", prov_dir)
+
+        self._add_component_files_to_provenance('sheet', self.config.sheet)
+
+        logger.info("Initialized provenance folder: %s", prov_dir)
 
     def _generate_potentials(self) -> PotentialManager:
         """Configures potential file for 4-layer sheet-on-sheet simulation.
@@ -120,112 +93,103 @@ class SheetOnSheetSimulation(SimulationBase):
         Returns:
             Configured PotentialManager instance.
         """
-        pm = PotentialManager(self.config.settings)
-        
-        # Register single sheet component with 4 layers
-        # Each layer gets its own potential instance (for SW, Tersoff, etc.)
+        pm = PotentialManager(
+            self.config.settings,
+            potentials_dir=self.output_dir / "provenance" / "potentials",
+            potentials_prefix=str(self.relative_run_dir / "provenance" / "potentials")
+        )
+
         pm.register_component('sheet', self.config.sheet, n_layers=N_LAYERS)
-        
-        # Self-Interactions: each layer gets its own many-body potential
+
         pm.add_self_interaction('sheet')
-        
-        # Interlayer Interactions:
-        # - Adjacent layers (distance=1): Real LJ
-        # - Non-adjacent layers (distance>1): Ghost LJ (prevent interpenetration)
-        pm.add_interlayer_lj_by_distance('sheet', max_real_distance=1)
-        
-        pm.write_file(self.output_dir / "lammps" / "system.in.settings")
-        
-        # Store layer group strings
+
+        pm.add_ghost_lj('sheet', max_real_distance=1)
+
+        settings_path = self.output_dir / "lammps" / "system.in.settings"
+        pm.write_file(settings_path)
+
         for layer in range(N_LAYERS):
             layer_num = layer + 1
-            self.groups[f'layer_{layer_num}'] = pm.get_layer_group_string('sheet', layer)
-        
-        # Convenience groups
+            self.groups[f'layer_{layer_num}'] = pm.types.get_layer_group_string(
+                'sheet', layer
+            )
+
         self.groups['center'] = f"{self.groups['layer_2']} {self.groups['layer_3']}"
-        self.groups['all_types'] = pm.get_group_string('sheet')
-        
+        self.groups['all_types'] = pm.types.get_group_string('sheet')
+
         return pm
 
     def write_inputs(self) -> None:
         """Generates LAMMPS scripts."""
         logger.info("Writing LAMMPS inputs...")
-        
-        total_types = self.pm.get_total_types() if self.pm else 0
+
+        assert self.pm is not None
+        assert self.sheet_dims is not None
+        assert self.lat_c is not None
+
+        total_types = len(self.pm.types) if self.pm else 0
         virtual_atom_type = total_types + 1
-        
+
         sim = self.config.settings.simulation
         out = self.config.settings.output
 
+        def _normalize_speed(speed):
+            if speed is None:
+                return 0.0
+            if isinstance(speed, (int, float)):
+                return speed / 100
+            if isinstance(speed, list):
+                return [s / 100 for s in speed]
+            raise TypeError(f"Unsupported scan_speed type: {type(speed)}")
+
+        rel_run_dir_str = str(self.relative_run_dir)
+
         context = {
-            # General settings
             'temp': self.config.general.temp,
-            'pressures': self.config.general.pressure,  # For LAMMPS index variable
-            'angles': self.config.general.scan_angle,   # For LAMMPS index variable
-            'scan_speed_norm': self.config.general.scan_speed / 100,  # Normalized for LAMMPS
-            
-            # Box dimensions (actual from build)
+            'pressures': self.config.general.pressure,
+            'angles': self.config.general.scan_angle,
+            'scan_speeds': _normalize_speed(self.config.general.scan_speed),
             'xlo': self.sheet_dims.get('xlo', 0.0),
             'xhi': self.sheet_dims.get('xhi', 100.0),
             'ylo': self.sheet_dims.get('ylo', 0.0),
             'yhi': self.sheet_dims.get('yhi', 100.0),
-            
-            # File paths (relative to run directory)
-            'data_file': str(self.output_dir / "build" / self.structure_paths['sheet'].name),
-            'potential_file': str(self.output_dir / "lammps" / "system.in.settings"),
-            
-            # Atom types
+            'data_file': f"{rel_run_dir_str}/build/{self.structure_paths['sheet'].name}",
+            'potential_file': f"{rel_run_dir_str}/lammps/system.in.settings",
             'num_atom_types': total_types,
             'ngroups': total_types,
-            
-            # Layer groups
             'layer_1_types': self.groups['layer_1'],
             'layer_2_types': self.groups['layer_2'],
             'layer_3_types': self.groups['layer_3'],
             'layer_4_types': self.groups['layer_4'],
             'center_types': self.groups['center'],
-            
-            # Geometry
             'n_layers': N_LAYERS,
             'lat_c': self.lat_c,
             'sheet_dims': self.sheet_dims,
-            
-            # Bond settings for interlayer springs
-            'bond_spring_ev': (self.config.general.bond_spring or 5.0) / 16.02,
-            'bond_min': self.lat_c * 0.8,  # 80% of interlayer spacing
-            'bond_max': self.lat_c * 1.2,  # 120% of interlayer spacing
-            
-            # Driving spring (convert N/m to eV/Å²: divide by 16.02)
-            'driving_spring_ev': (self.config.general.driving_spring or 50.0) / 16.02,
-            
-            # Simulation settings
+            'bond_spring_ev': ((self.config.general.bond_spring or 5.0) /
+                                16.02),
+            'bond_min': self.lat_c * 0.8,
+            'bond_max': self.lat_c * 1.2,
+            'driving_spring_ev': ((self.config.general.driving_spring or 50.0) / 16.02),
             'timestep': sim.timestep,
             'thermo': sim.thermo,
             'neighbor_list': sim.neighbor_list,
             'neigh_modify_command': sim.neigh_modify_command,
             'run_steps': sim.slide_run_steps,
-            
-            # Minimization settings
             'min_style': sim.min_style,
             'minimization_command': sim.minimization_command,
-            
-            # Output settings
             'results_freq': out.results_frequency,
             'dump_freq': out.dump_frequency.get('slide', 1000),
             'dump_enabled': out.dump.get('slide', False),
-            'results_file_pattern': str(self.output_dir / 'results' / 'friction_p${pressure}_a${a}.dat'),
-            'dump_file_pattern': str(self.output_dir / 'visuals' / 'slide_p${pressure}_a${a}.*.dump'),
-            
-            # Virtual atom for driving
+            'results_file_pattern': (f"{rel_run_dir_str}/results/"
+                                    f"friction_p${{pressure}}_a${{a}}.dat"),
+            'dump_file_pattern': (f"{rel_run_dir_str}/visuals/"
+                                    f"slide_p${{pressure}}_a${{a}}.*.dump"),
             'virtual_atom_type': virtual_atom_type,
             'drive_method': sim.drive_method,
-            
-            # Thermostat
             'thermostat_type': self.config.settings.thermostat.type,
         }
-        
-        # Render Templates
+
         script = self.render_template("sheetonsheet/slide.lmp", context)
         self.write_file("lammps/slide.in", script)
-        
-        logger.info(f"Inputs written to {self.output_dir}/lammps/")
+
+        logger.info("Inputs written to %s/lammps/", self.output_dir)

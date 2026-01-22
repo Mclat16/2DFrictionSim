@@ -1,0 +1,25 @@
+# LAMMPS commands for building AFM tip structure (spherical geometry)
+# Generated from template: build_tip.lmp
+
+clear
+units metal
+atom_style atomic
+boundary p p p
+
+read_data {{ base_lmp }}
+
+change_box all x final -{{ radius }} {{ radius * 2 }} y final -{{ radius }} {{ radius * 2 }}
+displace_atoms all move -{{ radius }} -{{ radius }} 0 units box
+
+region afm_tip sphere 0 0 {{ radius }} {{ radius }} side in units box
+region box block -{{ radius }} {{ radius }} -{{ radius }} {{ radius }} -3 {{ tip_height }} units box
+region tip intersect 2 afm_tip box
+
+group tip region tip
+group delete_atoms subtract all tip
+delete_atoms group delete_atoms
+
+change_box all x final -{{ radius }} {{ radius }} y final -{{ radius }} {{ radius }} z final -3 {{ tip_height + 1 }}
+reset_atoms id
+
+write_data {{ output_path }}

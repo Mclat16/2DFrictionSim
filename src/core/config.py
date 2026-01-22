@@ -148,8 +148,7 @@ class TipConfig(ComponentConfig):
     r: float = Field(..., description="Tip radius in Angstroms")
     amorph: Literal['c', 'a'] = Field('c', description="'c' for crystalline, 'a' for amorphous")
     dspring: float = Field(0.0, description="Damping constant")
-    s: float = Field(..., description="Sliding speed (m/s)")
-    
+
     @field_validator('amorph', mode='before')
     @classmethod
     def handle_empty_amorph(cls, v):
@@ -159,7 +158,7 @@ class TipConfig(ComponentConfig):
 class SubstrateConfig(ComponentConfig):
     """Substrate configuration parameters."""
     thickness: float
-    amorph: Literal['c', 'a'] = 'c'
+    amorph: Literal['c', 'a'] = Field('c', description="'c' for crystalline, 'a' for amorphous")
     @field_validator('amorph', mode='before')
     @classmethod
     def handle_empty_amorph(cls, v):
