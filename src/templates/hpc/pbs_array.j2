@@ -1,0 +1,47 @@
+#!/bin/bash
+#PBS -l select={{ select }}
+#PBS -l walltime={{ walltime }}
+#PBS -J 1-{{ array_size }}
+#PBS -o {{ log_dir }}/{{ job_name }}_^array_index^_out.txt
+#PBS -e {{ log_dir }}/{{ job_name }}_^array_index^_err.txt
+#PBS -N {{ job_name }}
+{% if queue %}
+#PBS -q {{ queue }}
+{% endif %}
+{% if account %}
+#PBS -A {{ account }}
+{% endif %}
+
+module purge
+{% for mod in modules %}
+module load {{ mod }}
+{% endfor %}
+
+SIM_PATH=$(sed -n "${PBS_ARRAY_INDEX}p" {{ manifest_file }})
+
+if [ -z "$SIM_PATH" ]; then
+    echo "Error: No simulation path for index ${PBS_ARRAY_INDEX}"
+    exit 1
+fi
+
+{% if use_tmpdir %}
+mkdir -p $TMPDIR/sim
+rsync -av --exclude='*.lammpstrj' {{ base_dir }}/${SIM_PATH}/ $TMPDIR/sim/
+cd $TMPDIR/sim
+{% else %}
+cd {{ base_dir }}/${SIM_PATH}
+{% endif %}
+
+{% for script in lammps_scripts %}
+{{ mpi_command }} lmp {{ lmp_flags }} -in lammps/{{ script }}
+if [ $? -ne 0 ]; then
+    echo "Error: LAMMPS failed on {{ script }}"
+    exit 1
+fi
+{% endfor %}
+
+{% if use_tmpdir %}
+cp -r results visuals {{ base_dir }}/${SIM_PATH}/
+{% endif %}
+
+echo "Simulation completed successfully: ${SIM_PATH}"

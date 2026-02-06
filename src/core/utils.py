@@ -193,6 +193,21 @@ def get_model_dimensions(lmp_path: Union[str, Path]) -> Dict[str, float | None]:
                 dims["zlo"], dims["zhi"] = map(float, line.split()[0:2])
     return dims
 
+def get_num_atom_types(lmp_path: Union[str, Path]) -> int:
+    """Read a LAMMPS data file and extract the number of atom types.
+
+    Args:
+        lmp_path: Path to the LAMMPS data file.
+
+    Returns:
+        Number of atom types in the file.
+    """
+    with open(lmp_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if "atom types" in line:
+                return int(line.split()[0])
+    return 1
+
 def lj_params(atom_type_1: str, atom_type_2: str) -> Tuple[float, float]:
     """Calculate LJ parameters using Lorentz-Berthelot mixing rules.
 

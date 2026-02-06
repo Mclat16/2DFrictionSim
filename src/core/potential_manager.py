@@ -26,9 +26,7 @@ from src.core.utils import count_atomtypes, lj_params, cifread
 
 logger = logging.getLogger(__name__)
 
-# Potentials that include interlayer interactions internally (no separate LJ needed)
 POTENTIALS_WITH_INTERNAL_LJ = {'airebo', 'comb', 'comb3', 'reaxff'}
-# Potentials that require explicit LJ for cross-component/interlayer interactions
 POTENTIALS_REQUIRING_LJ = {'sw', 'tersoff', 'rebo', 'edip', 'meam', 'eam', 'bop',
                             'morse', 'rebomos', 'sw/mod', 'extep', 'vashishta'}
 
@@ -240,7 +238,6 @@ class PotentialManager:
         self.potentials_dir: Optional[Path] = Path(potentials_dir).resolve() if potentials_dir else None
         self.potentials_prefix = potentials_prefix
 
-        # Allow explicit override, otherwise detect from settings
         if use_langevin is not None:
             self.use_langevin = use_langevin
         else:
@@ -249,13 +246,13 @@ class PotentialManager:
         self.components: Dict[str, Dict[str, Any]] = {}
         self.types = TypeRegistry()
 
-        # Track potential usage counts for hybrid indexing
         self.potential_usage: Dict[str, int] = defaultdict(int)
         self.potential_indices: Dict[str, int] = defaultdict(int)
 
-        # Interaction commands
         self.self_interaction_commands: List[str] = []
         self.cross_interaction_commands: List[str] = []
+
+        self.virtual_atom_type: Optional[int] = None
 
     def get_single_component_commands(
         self,
@@ -320,7 +317,6 @@ class PotentialManager:
 
         self.potential_usage[config.pot_type] += n_layers if self.is_sheet_lj(config.pot_type) else 1
 
-        # Langevin only applies to tip and substrate, never to sheets
         apply_langevin = self.use_langevin and name in ('tip', 'sub')
 
         if n_layers > 1:
@@ -330,7 +326,6 @@ class PotentialManager:
         else:
             self._assign_types(name, elements, pot_counts)
 
-        # Get the element map from registry for backward compatibility
         component_map = self.types.get_element_map(name)
 
         self.components[name] = {
@@ -343,6 +338,31 @@ class PotentialManager:
         }
 
         return component_map
+
+    def register_virtual_atom(self) -> int:
+        """Register a virtual atom type for SMD spring attachment.
+        
+        The virtual atom is used in the 'virtual_atom' drive method where
+        a massless particle is moved and the real atoms are tethered to it.
+        It has minimal LJ interactions with all other types.
+        
+        Returns:
+            The type ID assigned to the virtual atom.
+        """
+        if self.virtual_atom_type is not None:
+            logger.warning("Virtual atom already registered as type %d", self.virtual_atom_type)
+            return self.virtual_atom_type
+
+        virtual_type = self.types.register(
+            component='virtual',
+            element='Virtual',
+            pot_label='Virtual',
+            layer=None,
+            region=None
+        )
+        self.virtual_atom_type = virtual_type
+        logger.info("Registered virtual atom as type %d", virtual_type)
+        return virtual_type
 
     def _assign_types(
         self,
@@ -429,9 +449,8 @@ class PotentialManager:
 
     def add_self_interaction(self, component_name: str,
                             layer: Optional[int] = None):
-        """Add the self-interaction (many-body potential) for a component.
-
-        This generates pair_coeff commands with NULL mapping for hybrid style.
+        """Add self-interaction (many-body potential) for a component.
+        
         For multi-layer materials, can specify a specific layer or all layers.
 
         Args:
@@ -444,21 +463,17 @@ class PotentialManager:
         c_conf = comp['config']
         n_layers = comp['n_layers']
 
-        # Increment potential index for this usage
         self.potential_indices[c_conf.pot_type] += 1
         pot_index = self.potential_indices[c_conf.pot_type]
 
-        # Determine if we need indexing in hybrid style
         needs_index = self.potential_usage[c_conf.pot_type] > 1
         index_str = f" {pot_index}" if needs_index else ""
 
         if n_layers > 1 and self.is_sheet_lj(c_conf.pot_type):
-            # Multi-layer: each layer gets its own potential entry
             layers_to_process = [layer] if layer is not None else range(n_layers)
             for l in layers_to_process:
                 self._add_layer_self_interaction(comp, l, pot_index)
         else:
-            # Single component or potential that handles all internally
             atom_list = self.types.build_null_map(component_name)
             pot_path = self._get_potential_path(c_conf.pot_path)
             cmd = f"pair_coeff * * {c_conf.pot_type}{index_str} {pot_path} {' '.join(atom_list)}"
@@ -510,21 +525,17 @@ class PotentialManager:
         if not elements1 or not elements2:
             raise ValueError(f"Components '{comp1_name}' and/or '{comp2_name}' not found.")
 
-        # Generate interactions for all element pairs
         for el1 in elements1:
             for el2 in elements2:
-                # Get or calculate LJ parameters
                 if custom_params:
                     epsilon = custom_params.get('epsilon', 0.0)
                     sigma = custom_params.get('sigma', 3.0)
                 else:
                     epsilon, sigma = lj_params(el1, el2)
 
-                # Get type ranges for efficient pair_coeff
                 types1 = self.types.get_element_type_range(comp1_name, el1)
                 types2 = self.types.get_element_type_range(comp2_name, el2)
 
-                # Generate command (LAMMPS prefers lower type first)
                 if int(types1.split('*', maxsplit=1)[0]) > int(types2.split('*', maxsplit=1)[0]):
                     types1, types2 = types2, types1
 
@@ -555,7 +566,6 @@ class PotentialManager:
             logger.warning("Component '%s' has only 1 layer, skipping interlayer interaction.", component_name)
             return
 
-        # Generate all layer pairs if not specified
         if layer_pairs is None:
             layer_pairs = [(i, j) for i in range(n_layers) for j in range(i+1, n_layers)]
 
@@ -566,7 +576,6 @@ class PotentialManager:
                     if low_interaction:
                         epsilon = 1e-100  # Near-zero for ghost interaction
 
-                    # Get types for each layer
                     types_i = self.types.ids_by_component_layer_element(component_name, layer_i, el1)
                     types_j = self.types.ids_by_component_layer_element(component_name, layer_j, el2)
 
@@ -576,11 +585,10 @@ class PotentialManager:
                     t1_str = self.types.format_type_range(types_i)
                     t2_str = self.types.format_type_range(types_j)
 
-                    # Ensure ordering
                     if types_i[0] > types_j[0]:
                         t1_str, t2_str = t2_str, t1_str
 
-                    cmd = f"pair_coeff {t1_str} {t2_str} lj/cut {epsilon:.6f} {sigma:.4f}"
+                    cmd = f"pair_coeff {t1_str} {t2_str} lj/cut {epsilon:g} {sigma:.4f}"
                     self.cross_interaction_commands.append(
                         f"{cmd} # {el1}(L{layer_i+1})-{el2}(L{layer_j+1})"
                     )
@@ -683,14 +691,18 @@ class PotentialManager:
         lines = []
         for element, types in element_types.items():
             types = sorted(types)
-            try:
-                mass = atomic_masses[atomic_numbers[element]]
+            if element == 'Virtual':
                 type_range = self.types.format_type_range(types)
-                lines.append(f"mass {type_range} {mass:.6f} #{element}")
-            except (KeyError, IndexError):
-                logger.warning("Could not find mass for element '%s', using 1.0", element)
-                type_range = self.types.format_type_range(types)
-                lines.append(f"mass {type_range} 1.0 #{element} (unknown)")
+                lines.append(f"mass {type_range} 1.0 #Virtual atom")
+            else:
+                try:
+                    mass = atomic_masses[atomic_numbers[element]]
+                    type_range = self.types.format_type_range(types)
+                    lines.append(f"mass {type_range} {mass:.6f} #{element}")
+                except (KeyError, IndexError):
+                    logger.warning("Could not find mass for element '%s', using 1.0", element)
+                    type_range = self.types.format_type_range(types)
+                    lines.append(f"mass {type_range} 1.0 #{element} (unknown)")
 
         return "\n".join(lines)
 
@@ -710,13 +722,97 @@ class PotentialManager:
             name = comp['name']
             n_layers = comp['n_layers']
 
-            # Only output layer groups for multi-layer components
             if n_layers > 1:
                 for layer in range(n_layers):
                     types = self.types.get_layer_group_string(name, layer)
                     if types:
                         lines.append(f"group layer_{layer+1} type {types}")
 
+        return "\n".join(lines)
+
+    def get_component_groups_string(self) -> str:
+        """Generate LAMMPS group commands for all components.
+        
+        For Langevin components (tip, sub), generates:
+            - {component}_all: All types for component
+            - {component}_fix: Fix region types
+            - {component}_thermo: Thermo region types
+        
+        For sheet components, generates:
+            - 2D_all: All sheet types
+            - layer_N: Types for each layer (if multi-layer)
+        
+        For mobile group, generates union of thermo regions if Langevin is used.
+        
+        Returns:
+            String with group commands, one per line.
+        """
+        lines = []
+        has_langevin = False
+        langevin_thermo_groups = []
+        
+        for comp in self.components.values():
+            name = comp['name']
+            n_layers = comp['n_layers']
+            use_langevin = comp.get('use_langevin', False)
+
+            # Get all types for this component
+            all_types = self.types.ids_by_component(name)
+
+            if name == 'sheet':
+                # Sheet component uses '2D_all' as group name
+                if all_types:
+                    types_str = ' '.join(map(str, all_types))
+                    lines.append(f"group 2D_all type {types_str}")
+
+                # Add layer groups for multi-layer sheets
+                if n_layers > 1:
+                    for layer in range(n_layers):
+                        layer_types = self.types.get_layer_group_string(name, layer)
+                        if layer_types:
+                            lines.append(f"group layer_{layer+1} type {layer_types}")
+
+            elif use_langevin and name in ('tip', 'sub'):
+                # Langevin components: split into all, fix, thermo
+                has_langevin = True
+                
+                # Get types by region
+                normal_types = []
+                fix_types = []
+                thermo_types = []
+                
+                for atype in self.types:
+                    if atype.component == name:
+                        if atype.region is None:
+                            normal_types.append(atype.type_id)
+                        elif atype.region == 'fix':
+                            fix_types.append(atype.type_id)
+                        elif atype.region == 'thermo':
+                            thermo_types.append(atype.type_id)
+                
+                if all_types:
+                    types_str = ' '.join(map(str, sorted(all_types)))
+                    lines.append(f"group {name}_all type {types_str}")
+                
+                if fix_types:
+                    types_str = ' '.join(map(str, sorted(fix_types)))
+                    lines.append(f"group {name}_fix type {types_str}")
+                
+                if thermo_types:
+                    types_str = ' '.join(map(str, sorted(thermo_types)))
+                    lines.append(f"group {name}_thermo type {types_str}")
+                    langevin_thermo_groups.append(f"{name}_thermo")
+            
+            else:
+                # Standard component without Langevin
+                if all_types:
+                    types_str = ' '.join(map(str, all_types))
+                    lines.append(f"group {name}_all type {types_str}")
+        
+        # Add mobile group as union of all thermo regions
+        if has_langevin and langevin_thermo_groups:
+            lines.append(f"group mobile union {' '.join(langevin_thermo_groups)}")
+        
         return "\n".join(lines)
 
     def write_file(self, output_path: Path):
@@ -731,7 +827,6 @@ class PotentialManager:
             for _ in range(count):
                 style_parts.append(pot_type)
 
-        # Always add lj/cut with cutoff if we have cross-interactions
         lj_cutoff = self.settings.potential.lj_cutoff
         if self.cross_interaction_commands:
             style_parts.append(f"lj/cut {lj_cutoff}")
@@ -740,13 +835,10 @@ class PotentialManager:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(output_path, 'w', encoding='utf-8') as f:
-
             f.write(self.get_masses_string())
             f.write("\n")
-
-            f.write(self.get_layer_groups_string())
+            f.write(self.get_component_groups_string())
             f.write("\n")
-
             f.write(f"pair_style hybrid {' '.join(style_parts)}\n")
 
             if self.self_interaction_commands:
@@ -759,5 +851,10 @@ class PotentialManager:
                 f.write("# Cross-interactions (inter-component LJ)\n")
                 for cmd in self.cross_interaction_commands:
                     f.write(f"{cmd}\n")
+                f.write("\n")
+
+            if self.virtual_atom_type is not None:
+                f.write("# Virtual atom (minimal LJ)\n")
+                f.write(f"pair_coeff * {self.virtual_atom_type} lj/cut 1e-100 1e-100\n")
 
         logger.info("Wrote potential settings to %s", output_path)

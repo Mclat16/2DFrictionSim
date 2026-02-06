@@ -1,18 +1,18 @@
 """Command Line Interface for FrictionSim2D.
 
-Handles simulation execution, parameter sweeps, and settings management.
+Unified CLI for simulation execution, HPC script generation, and AiiDA integration.
 """
 
-import argparse
 import logging
 import sys
 import shutil
 import itertools
 from pathlib import Path
 from copy import deepcopy
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from importlib import resources
 import yaml
+import click
 
 from src.core.config import (
     parse_config, AFMSimulationConfig, SheetOnSheetSimulationConfig, 
@@ -20,7 +20,6 @@ from src.core.config import (
 from src.builders.afm import AFMSimulation
 from src.builders.sheetonsheet import SheetOnSheetSimulation
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -98,105 +97,389 @@ def expand_config_sweeps(base_config: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     return expanded_configs
 
-def handle_settings(args):
-    """Handle 'settings' subcommand."""
-    if args.action == 'show':
-        defaults = load_settings()
-        print(yaml.dump(defaults.dict(), default_flow_style=False))
-    elif args.action == 'reset':
-        local_settings = Path("settings.yaml")
-        if local_settings.exists():
-            local_settings.unlink()
-            logger.info("Removed local settings.yaml. Using package defaults.")
-        else:
-            logger.info("No local settings found to reset.")
-    elif args.action == 'init':
-        with resources.as_file(resources.files('src.data.settings') / 'settings_default.yaml') as p:
-            shutil.copy(p, "settings.yaml")
-        logger.info("Created mutable 'settings.yaml' in current directory.")
+# =============================================================================
+# MAIN CLI GROUP
+# =============================================================================
 
-def handle_run(args):
-    """Handle 'run' subcommand."""
-    config_path = Path(args.config_file)
-    if not config_path.exists():
-        logger.error("Config file not found: %s", config_path)
-        sys.exit(1)
+@click.group()
+@click.version_option(version='0.1.0', prog_name='FrictionSim2D')
+def cli():
+    """FrictionSim2D - Generate LAMMPS input files for 2D material friction simulations."""
+    pass
 
+# =============================================================================
+# RUN COMMANDS
+# =============================================================================
+
+@cli.group('run')
+def run_group():
+    """Run friction simulations."""
+    pass
+
+@run_group.command('afm')
+@click.argument('config_file', type=click.Path(exists=True))
+@click.option('--output-dir', '-o', default='simulation_output',
+              help='Output directory for generated files')
+@click.option('--aiida', 'use_aiida', is_flag=True,
+              help='Enable AiiDA provenance tracking')
+@click.option('--hpc', 'hpc_name', type=str, default=None,
+              help='HPC configuration name (overrides settings)')
+@click.option('--local', 'run_local', is_flag=True,
+              help='Mark as local run (no HPC submission)')
+def run_afm(config_file: str, output_dir: str, use_aiida: bool, 
+            hpc_name: Optional[str], run_local: bool):
+    """Generate AFM simulation files.
+    
+    Creates all necessary LAMMPS input files, structures, and potentials
+    for tip-on-substrate friction simulations.
+    
+    Example:
+        FrictionSim2D run.afm afm_config.ini -o ./afm_output --aiida
+    """
+    _run_simulation('afm', config_file, output_dir, use_aiida, hpc_name, run_local)
+
+@run_group.command('sheetonsheet')
+@click.argument('config_file', type=click.Path(exists=True))
+@click.option('--output-dir', '-o', default='simulation_output',
+              help='Output directory for generated files')
+@click.option('--aiida', 'use_aiida', is_flag=True,
+              help='Enable AiiDA provenance tracking')
+@click.option('--hpc', 'hpc_name', type=str, default=None,
+              help='HPC configuration name (overrides settings)')
+@click.option('--local', 'run_local', is_flag=True,
+              help='Mark as local run (no HPC submission)')
+def run_sheetonsheet(config_file: str, output_dir: str, use_aiida: bool,
+                     hpc_name: Optional[str], run_local: bool):
+    """Generate sheet-on-sheet simulation files.
+    
+    Creates all necessary LAMMPS input files for 4-layer sheet-on-sheet
+    friction simulations.
+    
+    Example:
+        FrictionSim2D run.sheetonsheet sheet_config.ini -o ./sheet_output
+    """
+    _run_simulation('sheetonsheet', config_file, output_dir, use_aiida, hpc_name, run_local)
+
+def _run_simulation(model: str, config_file: str, output_dir: str,
+                   use_aiida: bool, hpc_name: Optional[str], run_local: bool):
+    """Internal function to run simulations."""
+    config_path = Path(config_file)
+    
+    if use_aiida:
+        from src.aiida import AIIDA_AVAILABLE
+        if not AIIDA_AVAILABLE:
+            click.echo("⚠️  AiiDA not available. Install with:", err=True)
+            click.echo("   conda install -c conda-forge aiida-core", err=True)
+            raise click.Abort()
+    
     base_dict = parse_config(config_path)
     defaults = load_settings()
+    
+    if use_aiida:
+        defaults.aiida.enabled = True
+        defaults.aiida.create_provenance = True
+    
     configs_to_run = expand_config_sweeps(base_dict)
-
-    logger.info("Found %d simulation configurations to run.", len(configs_to_run))
-
+    
+    click.echo(f"📋 Found {len(configs_to_run)} simulation configurations")
+    
+    created_simulations = []
+    
     for i, run_dict in enumerate(configs_to_run):
         run_dict['settings'] = defaults.dict()
-
+        
         mat = run_dict['2D'].get('mat', 'unknown')
         x = run_dict['2D'].get('x', 100)
         y = run_dict['2D'].get('y', 100)
         temp = run_dict['general'].get('temp', 300)
-
-        if args.model == 'afm':
+        
+        if model == 'afm':
             tip_mat = run_dict.get('tip', {}).get('mat', 'Si')
             tip_amorph = run_dict.get('tip', {}).get('amorph', 'c')
             tip_r = run_dict.get('tip', {}).get('r', 25)
             sub_mat = run_dict.get('sub', {}).get('mat', 'Si')
             sub_amorph = run_dict.get('sub', {}).get('amorph', 'a')
-
+            
             sub_str = f"{sub_amorph}{sub_mat}" if sub_amorph == 'a' else sub_mat
             tip_str = f"{tip_amorph}{tip_mat}" if tip_amorph == 'a' else tip_mat
-
+            
             run_output_dir = (
-                Path(args.output_dir) / "afm" / mat / f"{x}x_{y}y" /
-                f"sub_{sub_str}_tip_{tip_str}_r{int(tip_r)}" /
-                f"K{int(temp)}"
+                Path(output_dir) / "afm" / mat / f"{x}x_{y}y" /
+                f"sub_{sub_str}_tip_{tip_str}_r{int(tip_r)}" / f"K{int(temp)}"
             )
         else:
             run_output_dir = (
-                Path(args.output_dir) / "sheetonsheet" / mat / f"{x}x_{y}y" /
-                f"K{int(temp)}"
+                Path(output_dir) / "sheetonsheet" / mat / f"{x}x_{y}y" / f"K{int(temp)}"
             )
-
-        logger.info("--- Run %d/%d: %s ---", i+1, len(configs_to_run), run_output_dir)
-
+        
+        click.echo(f"\n🔧 [{i+1}/{len(configs_to_run)}] Building: {run_output_dir.name}")
+        
         prov_dir = run_output_dir / 'provenance'
         prov_dir.mkdir(parents=True, exist_ok=True)
-
+        
         try:
-            if args.model == 'afm':
+            if model == 'afm':
                 config_obj = AFMSimulationConfig(**run_dict)
                 per_run_config_path = prov_dir / 'config.json'
                 per_run_config_path.write_text(config_obj.model_dump_json(indent=2), encoding='utf-8')
-                builder = AFMSimulation(config_obj, str(run_output_dir), config_path=str(per_run_config_path))
+                builder = AFMSimulation(config_obj, str(run_output_dir), 
+                                       config_path=str(per_run_config_path))
             else:
                 config_obj = SheetOnSheetSimulationConfig(**run_dict)
                 per_run_config_path = prov_dir / 'config.json'
                 per_run_config_path.write_text(config_obj.model_dump_json(indent=2), encoding='utf-8')
-                builder = SheetOnSheetSimulation(config_obj, str(run_output_dir), config_path=str(per_run_config_path))
-
+                builder = SheetOnSheetSimulation(config_obj, str(run_output_dir),
+                                                config_path=str(per_run_config_path))
+            
             builder.build()
-
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error("Run %d failed: %s", i+1, e)
+            created_simulations.append(run_output_dir)
+            click.echo(f"   ✅ Complete")
+            
+        except Exception as e:
+            click.echo(f"   ❌ Failed: {e}", err=True)
+            logger.exception("Build failed")
             continue
+    
+    if created_simulations and use_aiida:
+        click.echo(f"\n📦 Registering {len(created_simulations)} simulations in AiiDA...")
+        _register_simulations_aiida(created_simulations, config_path)
+    
+    click.echo(f"\n✅ Generation complete: {len(created_simulations)}/{len(configs_to_run)} successful")
+    click.echo(f"📂 Output directory: {Path(output_dir).absolute()}")
+
+def _register_simulations_aiida(simulation_dirs: List[Path], config_path: Path):
+    """Register generated simulations with AiiDA."""
+    try:
+        from src.aiida.integration import register_simulation_batch
+        registered = register_simulation_batch(simulation_dirs, config_path)
+        click.echo(f"   ✅ Registered {len(registered)} simulations")
+    except ImportError:
+        click.echo("   ⚠️  AiiDA integration module not found", err=True)
+    except Exception as e:
+        click.echo(f"   ⚠️  Registration failed: {e}", err=True)
+        logger.exception("AiiDA registration failed")
+
+# =============================================================================
+# SETTINGS COMMANDS
+# =============================================================================
+
+@cli.group('settings')
+def settings_group():
+    """Manage simulation settings."""
+    pass
+
+@settings_group.command('show')
+def settings_show():
+    """Display current settings."""
+    defaults = load_settings()
+    click.echo(yaml.dump(defaults.dict(), default_flow_style=False))
+
+@settings_group.command('init')
+def settings_init():
+    """Create a local settings.yaml file for customization."""
+    with resources.as_file(resources.files('src.data.settings') / 'settings.yaml') as p:
+        shutil.copy(p, "settings.yaml")
+    click.echo("✅ Created 'settings.yaml' in current directory")
+
+@settings_group.command('reset')
+def settings_reset():
+    """Remove local settings.yaml and use package defaults."""
+    local_settings = Path("settings.yaml")
+    if local_settings.exists():
+        local_settings.unlink()
+        click.echo("✅ Removed local settings.yaml")
+    else:
+        click.echo("ℹ️  No local settings found")
+
+# =============================================================================
+# HPC COMMANDS
+# =============================================================================
+
+@cli.group('hpc')
+def hpc_group():
+    """Generate HPC submission scripts."""
+    pass
+
+@hpc_group.command('generate')
+@click.argument('simulation_dir', type=click.Path(exists=True))
+@click.option('--scheduler', '-s', type=click.Choice(['pbs', 'slurm']), default='pbs',
+              help='HPC scheduler type')
+@click.option('--output-dir', '-o', default=None,
+              help='Output directory for scripts (default: simulation_dir/hpc)')
+def hpc_generate(simulation_dir: str, scheduler: str, output_dir: Optional[str]):
+    """Generate HPC submission scripts for existing simulations.
+    
+    Scans simulation directory and creates PBS or SLURM job scripts.
+    
+    Example:
+        FrictionSim2D hpc generate ./afm_output --scheduler pbs
+    """
+    from src.hpc import HPCScriptGenerator, HPCConfig
+    
+    sim_dir = Path(simulation_dir)
+    out_dir = Path(output_dir) if output_dir else sim_dir / 'hpc'
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    click.echo(f"🖥️  Generating {scheduler.upper()} scripts for: {sim_dir}")
+    
+    simulation_paths = []
+    for lammps_dir in sim_dir.rglob('lammps'):
+        if lammps_dir.is_dir() and (lammps_dir / 'system.in').exists():
+            rel_path = lammps_dir.parent.relative_to(sim_dir)
+            simulation_paths.append(str(rel_path))
+    
+    if not simulation_paths:
+        click.echo("❌ No simulation directories found", err=True)
+        raise click.Abort()
+    
+    click.echo(f"📋 Found {len(simulation_paths)} simulations")
+    
+    settings = load_settings()
+    hpc_config = HPCConfig.from_settings(settings.hpc)
+    hpc_config.scheduler_type = scheduler
+    
+    generator = HPCScriptGenerator(hpc_config)
+    scripts = generator.generate_scripts(
+        simulation_paths=simulation_paths,
+        output_dir=out_dir,
+        scheduler=scheduler
+    )
+    
+    click.echo(f"✅ Generated {len(scripts)} script(s) in {out_dir}")
+    click.echo(f"\n📝 Next steps:")
+    click.echo(f"   1. Review scripts in {out_dir}")
+    click.echo(f"   2. Transfer to HPC cluster")
+    click.echo(f"   3. Run ./submit_all.sh")
+
+# =============================================================================
+# AIIDA COMMANDS (Optional)
+# =============================================================================
+
+@cli.group('aiida')
+def aiida_group():
+    """AiiDA workflow management (requires aiida-core)."""
+    from src.aiida import AIIDA_AVAILABLE
+    if not AIIDA_AVAILABLE:
+        click.echo("⚠️  AiiDA not available. Install with:", err=True)
+        click.echo("   conda install -c conda-forge aiida-core", err=True)
+        raise click.Abort()
+
+@aiida_group.command('status')
+def aiida_status():
+    """Check AiiDA installation and profile status."""
+    from src.aiida import AIIDA_AVAILABLE
+    
+    if not AIIDA_AVAILABLE:
+        click.echo("❌ AiiDA not installed")
+        return
+    
+    click.echo("✅ AiiDA is installed")
+    
+    try:
+        from aiida import load_profile
+        profile = load_profile()
+        click.echo(f"✅ Active profile: {profile.name}")
+        click.echo(f"   Storage: {profile.storage_backend}")
+    except Exception as e:
+        click.echo(f"⚠️  No active profile: {e}")
+        click.echo("\n📝 Setup AiiDA with: verdi presto --use-postgres")
+
+@aiida_group.command('import')
+@click.argument('results_dir', type=click.Path(exists=True))
+@click.option('--process/--no-process', default=True,
+              help='Run postprocessing on results')
+def aiida_import(results_dir: str, process: bool):
+    """Import completed simulation results into AiiDA database.
+    
+    Example:
+        FrictionSim2D aiida import ./returned_results
+    """
+    from src.aiida.integration import import_results_to_aiida
+    
+    results_path = Path(results_dir)
+    click.echo(f"📥 Importing results from: {results_path}")
+    
+    try:
+        if process:
+            click.echo("🔄 Running postprocessing...")
+            from src.postprocessing.read_data import DataReader
+            reader = DataReader(results_dir=str(results_path))
+            click.echo("   ✅ Postprocessing complete")
+        
+        imported = import_results_to_aiida(results_path)
+        click.echo(f"✅ Imported {len(imported)} simulations to AiiDA")
+        
+    except Exception as e:
+        click.echo(f"❌ Import failed: {e}", err=True)
+        logger.exception("Import failed")
+        raise click.Abort()
+
+@aiida_group.command('query')
+@click.option('--material', '-m', help='Filter by material')
+@click.option('--layers', '-l', type=int, help='Filter by layer count')
+@click.option('--force', '-f', type=float, help='Filter by applied force')
+@click.option('--format', 'output_format', type=click.Choice(['table', 'csv', 'json']),
+              default='table', help='Output format')
+@click.option('--output', '-o', type=click.Path(), help='Save to file')
+def aiida_query(material: Optional[str], layers: Optional[int], force: Optional[float],
+                output_format: str, output: Optional[str]):
+    """Query simulation database.
+    
+    Example:
+        FrictionSim2D aiida query --material h-MoS2 --layers 2 --format csv
+    """
+    from src.aiida.db import Friction2DDB
+    
+    db = Friction2DDB()
+    
+    filters = {}
+    if material:
+        filters['material'] = material
+    if layers:
+        filters['layers'] = layers
+    if force:
+        filters['force'] = force
+    
+    click.echo(f"🔍 Querying database with filters: {filters}")
+    
+    try:
+        results = db.query(**filters)
+        click.echo(f"📊 Found {results.total_count} results")
+        
+        if output_format == 'table':
+            df = results.to_dataframe()
+            click.echo("\n" + df.to_string(index=False))
+        elif output_format == 'csv':
+            df = results.to_dataframe()
+            if output:
+                df.to_csv(output, index=False)
+                click.echo(f"✅ Saved to {output}")
+            else:
+                click.echo(df.to_csv(index=False))
+        elif output_format == 'json':
+            if output:
+                results.export_json(Path(output))
+                click.echo(f"✅ Saved to {output}")
+            else:
+                import json
+                click.echo(json.dumps(results.query_params, indent=2))
+                
+    except Exception as e:
+        click.echo(f"❌ Query failed: {e}", err=True)
+        raise click.Abort()
+
+# =============================================================================
+# MAIN ENTRY POINT
+# =============================================================================
 
 def main():
     """Main CLI entry point."""
-    parser = argparse.ArgumentParser(description="FrictionSim2D CLI")
-    subparsers = parser.add_subparsers(dest='command', required=True)
-
-    run_parser = subparsers.add_parser('run', help='Run simulations')
-    run_parser.add_argument("config_file", type=str)
-    run_parser.add_argument("--model", "-m", choices=['afm', 'sheetonsheet'], default='afm')
-    run_parser.add_argument("--output-dir", "-o", default="simulation_output")
-    run_parser.set_defaults(func=handle_run)
-
-    settings_parser = subparsers.add_parser('settings', help='Manage settings')
-    settings_parser.add_argument("action", choices=['show', 'init', 'reset'])
-    settings_parser.set_defaults(func=handle_settings)
-
-    args = parser.parse_args()
-    args.func(args)
+    try:
+        cli()
+    except Exception as e:
+        logger.exception("Command failed")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
+

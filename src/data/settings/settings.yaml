@@ -54,25 +54,30 @@ quench:
   run_local: true               # Whether to run quenching locally (true/false)
   n_procs: 16                     # Number of processors to use if not running locally
 
-# AiiDA / HPC settings
-aiida:
-  # Code labels (for online AiiDA workflow)
-  lammps_code_label: 'lammps@my_hpc'
-  postprocess_code_label: 'python@my_hpc'
-  postprocess_script_path: '/path/to/your/read_data.py'
-  
-  # Resource allocation
-  num_cpus: 32                    # CPUs per simulation
-  memory_gb: 8                    # Memory per simulation in GB
-  walltime_seconds: 72000         # 20 hours per simulation
-  
-  # Scheduler settings (for offline HPC workflow)
+# HPC cluster settings
+hpc:
   scheduler_type: 'pbs'           # 'pbs' or 'slurm'
-  queue: 'normal'                 # PBS queue name (or SLURM partition)
+  queue: 'normal'                 # PBS queue name
+  partition: null                 # SLURM partition (optional)
   account: ''                     # Account/project to charge (optional)
+  num_nodes: 1                    # Number of nodes per job
+  num_cpus: 32                    # CPUs per node
+  memory_gb: 62                   # Memory per node in GB
+  walltime_hours: 20              # Walltime per job in hours
   max_array_size: 300             # Maximum simulations per array job
-  
-  # Environment modules to load on HPC
-  modules:
-    - 'lammps/2023'
-    # - 'python/3.10'
+  modules:                        # Environment modules to load on HPC
+    - 'tools/prod'
+    - 'LAMMPS/29Aug2024-foss-2023b-kokkos'
+  mpi_command: 'mpirun'           # MPI launch command
+  use_tmpdir: true                # Copy simulation to local temp directory on compute nodes
+
+# AiiDA workflow settings (optional)
+aiida:
+  enabled: false                  # Enable AiiDA provenance tracking
+  lammps_code_label: 'lammps@my_hpc'       # For direct HPC connection
+  postprocess_code_label: 'python@my_hpc'  # For direct HPC connection
+  postprocess_script_path: '/path/to/your/read_data.py'
+  create_provenance: true         # Create provenance nodes during file generation
+  auto_import_results: false      # Automatically import results after HPC completion
+  hpc_mode: 'offline'             # 'offline', 'local', or 'remote'
+

@@ -74,25 +74,33 @@ class PotentialSettings(BaseModel):
     lj_type: str = Field(default='LJ_base', alias='LJ_type')
     model_config = {'validate_by_name': True}
 
+class HPCSettings(BaseModel):
+    """HPC cluster and job submission settings."""
+    scheduler_type: Literal['pbs', 'slurm'] = 'pbs'
+    queue: str = 'normal'
+    partition: Optional[str] = None
+    account: str = ''
+    num_nodes: int = 1
+    num_cpus: int = 32
+    memory_gb: int = 62
+    walltime_hours: int = 20
+    max_array_size: int = 300
+    modules: List[str] = Field(default_factory=lambda: [
+        'tools/prod',
+        'LAMMPS/29Aug2024-foss-2023b-kokkos'
+    ])
+    mpi_command: str = "mpirun"
+    use_tmpdir: bool = True
+
 class AiidaSettings(BaseModel):
-    """AiiDA and HPC workflow settings."""
-    # Code labels (for online AiiDA workflow)
+    """AiiDA-specific workflow settings."""
+    enabled: bool = False
     lammps_code_label: str = 'lammps@my_hpc'
     postprocess_code_label: str = 'python@my_hpc'
     postprocess_script_path: str = ''
-
-    # Resource allocation
-    num_cpus: int = 32
-    memory_gb: int = 8
-    walltime_seconds: int = 72000
-
-    # Scheduler settings (for offline HPC workflow)
-    scheduler_type: Literal['pbs', 'slurm'] = 'pbs'
-    queue: str = 'normal'
-    account: str = ''
-    max_array_size: int = 300
-    # Environment modules to load on HPC
-    modules: List[str] = Field(default_factory=lambda: ['lammps/2023'])
+    create_provenance: bool = True
+    auto_import_results: bool = False
+    hpc_mode: Literal['local', 'remote', 'offline'] = 'offline'
 
 class GlobalSettings(BaseModel):
     """Represents the full structure of settings.yaml with hardcoded defaults."""
@@ -102,6 +110,7 @@ class GlobalSettings(BaseModel):
     quench: QuenchSettings = Field(default_factory=QuenchSettings)
     output: OutputSettings = Field(default_factory=OutputSettings)
     potential: PotentialSettings = Field(default_factory=PotentialSettings)
+    hpc: HPCSettings = Field(default_factory=HPCSettings)
     aiida: AiidaSettings = Field(default_factory=AiidaSettings)
 
 # --- User Input Settings (From .ini files) ---
@@ -135,7 +144,6 @@ class ComponentConfig(BaseModel):
         path = Path(v)
         if path.exists():
             return str(path)
-        # Dispatch specific lookup logic
         if info.field_name == 'pot_path':
             resolved = get_potential_path(v)
         else:
@@ -189,7 +197,7 @@ class AFMSimulationConfig(BaseModel):
     general: GeneralConfig
     tip: TipConfig
     sub: SubstrateConfig
-    sheet: SheetConfig = Field(..., alias='2D')  # Map [2D] section to .sheet
+    sheet: SheetConfig = Field(..., alias='2D')
     settings: GlobalSettings
 
 class SheetOnSheetSimulationConfig(BaseModel):
@@ -214,7 +222,7 @@ def load_settings() -> GlobalSettings:
         if settings_resource.is_file():
             with settings_resource.open('r') as f:
                 user_settings = yaml.safe_load(f) or {}
-                if user_settings:  # Only use if file has content
+                if user_settings:
                     return GlobalSettings(**user_settings)
     except (FileNotFoundError, AttributeError):
         pass

@@ -31,15 +31,25 @@ dependencies = [
 
 [project.scripts]
 FrictionSim2D = "src.cli:main"
-friction2d = "src.aiida.cli.commands:main"
 
 [project.optional-dependencies]
 aiida = [
   "aiida-core>=2.0",
+  "aiida-core.services>=2.0",
+  "psycopg2-binary>=2.9",
+]
+plotting = [
+  "matplotlib>=3.5",
+  "seaborn>=0.12",
+  "scipy>=1.8",
 ]
 dev = [
   "pytest>=7.0",
   "pytest-cov>=4.0",
+  "pylint>=2.15",
+]
+all = [
+  "FrictionSim2D[aiida,plotting]",
 ]
 
 [tool.pytest.ini_options]

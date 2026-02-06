@@ -15,17 +15,16 @@ class FrictionResultsData(Data):
     """AiiDA Data node storing friction simulation results.
     
     Stores:
-        - Time-series data (nf, lfx, lfy, positions, etc.)
+        - Time-series data (nf, lfx, lfy, lateral_force, cof, positions, etc.)
+        - Summary statistics (mean, std for all fields)
         - Metadata about the results (ntimesteps, fields)
-        - Computed summary statistics (optional)
     
-    The time-series data is stored as lists for JSON compatibility,
-    but accessor methods can return numpy arrays for analysis.
+    Time-series data is stored as lists in attributes for PostgreSQL compatibility.
+    Summary statistics are stored as direct attributes for efficient querying.
     """
     
-    # Standard fields in friction simulation output
-    STANDARD_FIELDS = ['time', 'nf', 'lfx', 'lfy', 'comx', 'comy', 'comz', 
-                       'tipx', 'tipy', 'tipz']
+    STANDARD_FIELDS = ['time', 'nf', 'lfx', 'lfy', 'lateral_force', 'cof',
+                       'comx', 'comy', 'comz', 'tipx', 'tipy', 'tipz']
     
     def __init__(self, **kwargs):
         """Initialize the results data node."""
@@ -54,6 +53,16 @@ class FrictionResultsData(Data):
             else:
                 serializable[key] = list(val)
         self.base.attributes.set('time_series', serializable)
+        
+        # Auto-update metadata
+        if serializable:
+            lengths = [len(v) for v in serializable.values()]
+            if lengths:
+                self.ntimesteps = lengths[0]
+                self.fields = list(serializable.keys())
+        
+        # Auto-calculate summary statistics
+        self._calculate_summary_statistics()
     
     @property
     def time(self) -> List[float]:
@@ -144,6 +153,85 @@ class FrictionResultsData(Data):
     @is_complete.setter
     def is_complete(self, value: bool):
         self.base.attributes.set('is_complete', bool(value))
+    
+    # -------------------------------------------------------------------------
+    # Summary Statistics Properties
+    # -------------------------------------------------------------------------
+    
+    @property
+    def mean_nf(self) -> float:
+        """Mean normal force."""
+        return self.base.attributes.get('mean_nf', 0.0)
+    
+    @property
+    def mean_lfx(self) -> float:
+        """Mean lateral force (x-direction)."""
+        return self.base.attributes.get('mean_lfx', 0.0)
+    
+    @property
+    def mean_lfy(self) -> float:
+        """Mean lateral force (y-direction)."""
+        return self.base.attributes.get('mean_lfy', 0.0)
+    
+    @property
+    def mean_lateral_force(self) -> float:
+        """Mean magnitude of lateral force."""
+        return self.base.attributes.get('mean_lateral_force', 0.0)
+    
+    @property
+    def mean_cof(self) -> float:
+        """Mean coefficient of friction."""
+        return self.base.attributes.get('mean_cof', 0.0)
+    
+    @property
+    def std_cof(self) -> float:
+        """Standard deviation of coefficient of friction."""
+        return self.base.attributes.get('std_cof', 0.0)
+    
+    @property
+    def friction_coefficient(self) -> float:
+        """Friction coefficient (alias for mean_cof)."""
+        return self.mean_cof
+    
+    def _calculate_summary_statistics(self):
+        """Calculate and store summary statistics from time-series data."""
+        ts = self.time_series
+        
+        if not ts:
+            return
+        
+        # Calculate statistics for each field
+        for field in ['nf', 'lfx', 'lfy', 'lateral_force', 'cof']:
+            if field in ts:
+                arr = np.array(ts[field])
+                self.base.attributes.set(f'mean_{field}', float(np.mean(arr)))
+                self.base.attributes.set(f'std_{field}', float(np.std(arr)))
+                self.base.attributes.set(f'min_{field}', float(np.min(arr)))
+                self.base.attributes.set(f'max_{field}', float(np.max(arr)))
+        
+        # Set friction_coefficient as alias for mean_cof
+        if 'cof' in ts:
+            self.base.attributes.set('friction_coefficient', self.mean_cof)
+    
+    def get_summary_statistics(self) -> Dict[str, Dict[str, float]]:
+        """Get all summary statistics as a nested dictionary.
+        
+        Returns:
+            Dictionary with structure: {field: {stat_name: value}}
+        """
+        summary = {}
+        for field in ['nf', 'lfx', 'lfy', 'lateral_force', 'cof']:
+            field_stats = {}
+            for stat in ['mean', 'std', 'min', 'max']:
+                key = f'{stat}_{field}'
+                val = self.base.attributes.get(key)
+                if val is not None:
+                    field_stats[stat] = val
+            if field_stats:
+                summary[field] = field_stats
+        
+        summary['friction_coefficient'] = self.friction_coefficient
+        return summary
     
     # -------------------------------------------------------------------------
     # Data Access Methods (return numpy arrays for analysis)

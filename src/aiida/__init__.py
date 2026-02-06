@@ -1,115 +1,79 @@
 """AiiDA plugin for FrictionSim2D.
 
-This module provides integration with AiiDA for managing friction simulations,
-including:
+This module provides optional integration with AiiDA for managing friction simulations.
+All functionality gracefully degrades if AiiDA is not installed.
 
-- Custom data types for storing simulation metadata and results
-- HPC script generation for PBS and SLURM schedulers
-- Job manifest system for offline HPC workflows
-- Query interface (Friction2DDB) for accessing stored data
-- CLI commands for workflow management
-- Workflow orchestration for the complete simulation pipeline
+Provides:
+- Custom data types (nodes) for storing simulation metadata and results
+- Database query interface (Friction2DDB) for accessing stored data  
+- Integration functions for registering simulations and importing results
 
-Typical Usage (Offline HPC Workflow):
---------------------------------------
+Usage:
+------
+Registration (done via CLI or programmatically):
+    from src.aiida.integration import register_simulation_batch
+    register_simulation_batch(simulation_dirs, config_path)
 
-1. **Prepare simulations**::
+Import results:
+    from src.aiida.integration import import_results_to_aiida
+    import_results_to_aiida(results_dir)
 
-    from src.aiida.workflows import FrictionSimWorkflow
-    
-    workflow = FrictionSimWorkflow(
-        config_path='afm_config.ini',
-        output_dir='./friction_output'
-    )
-    workflow.prepare()
-
-2. **Export for HPC**::
-
-    workflow.export(scheduler='pbs')
-    # Creates ./friction_output_hpc/ ready for transfer
-
-3. **Manual HPC execution**:
-   - Transfer package to HPC
-   - Run: cd scripts && ./submit_all.sh
-   - Transfer results back
-
-4. **Import and postprocess**::
-
-    workflow.import_results('./returned_results')
-    workflow.postprocess()
-
-5. **Query results**::
-
+Query database:
     from src.aiida.db import Friction2DDB
-    
     db = Friction2DDB()
     results = db.query_by_material('h-MoS2')
-    df = results.to_dataframe()
 
-CLI Usage:
-----------
-    # Generate simulations
-    friction2d prepare afm_config.ini -o ./output
-    
-    # Export for HPC
-    friction2d export ./output -o ./hpc_package -s pbs
-    
-    # Import results
-    friction2d import ./returned_results
-    
-    # Query database
-    friction2d query -m h-MoS2 -l 2
-
+CLI Commands:
+    FrictionSim2D run.afm config.ini --aiida    # Auto-register after building
+    FrictionSim2D aiida import ./results        # Import results
+    FrictionSim2D aiida query -m h-MoS2         # Query database
 """
 
-# Data types
-from .data import (
-    FrictionSimulationData,
-    FrictionConfigData,
-    FrictionResultsData,
-    FrictionProvenanceData,
-)
+try:
+    import aiida
+    AIIDA_AVAILABLE = True
+except ImportError:
+    AIIDA_AVAILABLE = False
 
-# HPC utilities
-from .hpc import (
-    HPCScriptGenerator,
-    HPCConfig,
-    JobManifest,
-    JobEntry,
-    JobStatus,
-)
+__all__ = ['AIIDA_AVAILABLE']
 
-# Database interface
-from .db import Friction2DDB
-
-# Workflows
-from .workflows import (
-    FrictionSimWorkflow,
-    PreparationWorkflow,
-    PostProcessWorkflow,
-)
-
-# CLI
-from .cli.commands import friction2d as cli
-
-__all__ = [
-    # Data types
-    'FrictionSimulationData',
-    'FrictionConfigData',
-    'FrictionResultsData',
-    'FrictionProvenanceData',
-    # HPC
-    'HPCScriptGenerator',
-    'HPCConfig',
-    'JobManifest',
-    'JobEntry',
-    'JobStatus',
-    # Database
-    'Friction2DDB',
-    # Workflows
-    'FrictionSimWorkflow',
-    'PreparationWorkflow',
-    'PostProcessWorkflow',
-    # CLI
-    'cli',
-]
+if AIIDA_AVAILABLE:
+    try:
+        # Data nodes
+        from .data import (
+            FrictionSimulationData,
+            FrictionConfigData,
+            FrictionResultsData,
+            FrictionProvenanceData,
+        )
+        
+        # Database query interface
+        from .db import Friction2DDB
+        
+        # Integration functions (main entry points)
+        from .integration import (
+            register_simulation_batch,
+            register_single_simulation,
+            import_results_to_aiida,
+        )
+        
+        __all__.extend([
+            # Data nodes
+            'FrictionSimulationData',
+            'FrictionConfigData',
+            'FrictionResultsData',
+            'FrictionProvenanceData',
+            # Database
+            'Friction2DDB',
+            # Integration
+            'register_simulation_batch',
+            'register_single_simulation',
+            'import_results_to_aiida',
+        ])
+    except ImportError as e:
+        import warnings
+        warnings.warn(
+            f"AiiDA is installed but some modules failed to import: {e}",
+            ImportWarning
+        )
+        AIIDA_AVAILABLE = False

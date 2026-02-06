@@ -30,7 +30,7 @@ from src.core.config import GlobalSettings, SheetConfig, SubstrateConfig, TipCon
 from src.core.potential_manager import PotentialManager
 from src.core.utils import (
     cifread, count_atomtypes, get_material_path, get_model_dimensions,
-    renumber_atom_types, check_potential_cif_compatibility
+    renumber_atom_types, check_potential_cif_compatibility, get_num_atom_types
 )
 from src.interfaces.atomsk import AtomskWrapper
 from src.interfaces.jinja import PackageLoader
@@ -38,19 +38,58 @@ from src.interfaces.lammps import run_lammps_commands
 
 logger = logging.getLogger(__name__)
 
-def calculate_layer_shifts(mat_name: str, dims: Dict[str, float]) -> Tuple[float, float]:
-    """Calculate in-plane stacking shifts based on material type.
+def calculate_layer_shifts(
+    mat_name: str,
+    dims: Dict[str, float],
+    n_layers: int = 1,
+    use_pair_bonding: bool = False,
+    stacking_type: str = 'AB'
+) -> List[Tuple[float, float]]:
+    """Calculate in-plane stacking shifts for each layer.
     
     Args:
         mat_name: Material name.
-        dims: Box dimensions with xlo, xhi, ylo, yhi keys.
+        dims: Box dimensions.
+        n_layers: Number of layers.
+        use_pair_bonding: If True, first and last pairs are bonded with no relative shift.
+        stacking_type: Stacking type ('AA' or 'AB'). AA has no shifts, AB has shifts.
         
     Returns:
-        Tuple of (shift_x, shift_y) for layer stacking.
+        List of (shift_x, shift_y) tuples per layer.
     """
+    if stacking_type.upper() == 'AA':
+        return [(0.0, 0.0) for _ in range(n_layers)]
+
     if mat_name.startswith('p-') or mat_name == 'black_phosphorus':
-        return (dims['xhi'] - dims['xlo']) / 2, (dims['yhi'] - dims['ylo']) / 2
-    return 0, (dims['yhi'] - dims['ylo']) / 3
+        base_shift_x = (dims['xhi'] - dims['xlo']) / 2
+        base_shift_y = (dims['yhi'] - dims['ylo']) / 2
+    else:
+        base_shift_x = 0.0
+        base_shift_y = (dims['yhi'] - dims['ylo']) / 3
+
+    layer_shifts = []
+
+    if use_pair_bonding and n_layers >= 3:
+        for i in range(n_layers):
+            if n_layers == 3:
+                if i == 0:
+                    layer_shifts.append((0.0, 0.0))
+                else:
+                    layer_shifts.append((base_shift_x, base_shift_y))
+            else:
+                if i <= 1:
+                    layer_shifts.append((0.0, 0.0))
+                elif i >= n_layers - 2:
+                    num_shifts = n_layers - 3
+                    layer_shifts.append((base_shift_x * num_shifts, base_shift_y * num_shifts))
+                else:
+                    num_shifts = i - 1
+                    layer_shifts.append((base_shift_x * num_shifts, base_shift_y * num_shifts))
+    else:
+        for i in range(n_layers):
+            layer_shifts.append((base_shift_x * i, base_shift_y * i))
+
+    return layer_shifts
 
 def create_orthogonal_slab(
     cif_path: Path,
@@ -309,7 +348,6 @@ def _create_base_slab(
             atomsk=atomsk
         )
 
-
 def stack_multilayer_sheet(
     base_layer_path: Path,
     config: SheetConfig,
@@ -318,9 +356,12 @@ def stack_multilayer_sheet(
     n_layers: int,
     types_per_layer: int,
     pot_counts: Dict[str, int],
+    supercell_dims: Dict[str, float],
     lat_c: Optional[float] = None,
-    settings: Optional[GlobalSettings] = None
-) -> Tuple[Path, float]:
+    settings: Optional[GlobalSettings] = None,
+    use_pair_bonding: bool = False,
+    stacking_type: str = 'AB'
+) -> float:
     """Stack multiple 2D material layers with proper atom type renumbering.
     
     Args:
@@ -331,28 +372,30 @@ def stack_multilayer_sheet(
         n_layers: Number of layers to stack.
         types_per_layer: Atom types per layer before renumbering.
         pot_counts: Element to type count mapping.
+        supercell_dims: Original supercell dimensions for calculating shifts.
         lat_c: Interlayer distance (calculated if None).
         settings: Global settings (required if lat_c is None).
-        
+        use_pair_bonding: If True, layers are bonded in pairs (L1-L2, L3-L4)
+            with no relative shift within pairs. Used for sheetonsheet simulations.
+        stacking_type: Stacking type ('AA' or 'AB'). AA has no shifts, AB has shifts.
     Returns:
-        Tuple of (output_path, lat_c).
+        float: Interlayer distance (lat_c).
     """
     if n_layers < 2:
         raise ValueError("stack_multilayer_sheet requires at least 2 layers")
 
-    sx, sy = calculate_layer_shifts(config.mat, box_dims)
     calculate_lat_c = lat_c is None
 
     if calculate_lat_c:
-        assert settings is not None, "settings required for lat_c calculation"
+        assert settings is not None
         logger.info("Running minimization to find optimal interlayer distance")
         initial_guess = settings.geometry.lat_c_default
     else:
         assert settings is not None
         initial_guess = lat_c
 
-    pot_file = Path(tempfile.gettempdir()) / f"sheet_{n_layers}_{uuid.uuid4().hex[:8]}.in.settings"
     layers_for_setup = 2 if calculate_lat_c else n_layers
+    pot_file = Path(tempfile.gettempdir()) / f"sheet_{layers_for_setup}_{uuid.uuid4().hex[:8]}.in.settings"
 
     pm = PotentialManager(settings)
     pm.register_component("sheet", config, n_layers=layers_for_setup)
@@ -374,6 +417,13 @@ def stack_multilayer_sheet(
 
     layer_shifts = [initial_guess * l for l in range(layers_for_setup)]
 
+    per_layer_shifts = calculate_layer_shifts(
+        config.mat, supercell_dims, n_layers=layers_for_setup, 
+        use_pair_bonding=use_pair_bonding, stacking_type=stacking_type
+    )
+    layer_shifts_x = [shift[0] for shift in per_layer_shifts]
+    layer_shifts_y = [shift[1] for shift in per_layer_shifts]
+
     context = {
         'box_xlo': box_dims['xlo'],
         'box_xhi': box_dims['xhi'],
@@ -384,8 +434,8 @@ def stack_multilayer_sheet(
         'base_layer_path': base_layer_path,
         'n_layers': layers_for_setup,
         'layer_shifts': layer_shifts,
-        'shift_x': sx,
-        'shift_y': sy,
+        'layer_shifts_x': layer_shifts_x,
+        'layer_shifts_y': layer_shifts_y,
         'types_per_layer': types_per_layer,
         'pot_counts': pot_counts,
         'pot_file': pot_file,
@@ -420,8 +470,11 @@ def stack_multilayer_sheet(
                     n_layers=n_layers,
                     types_per_layer=types_per_layer,
                     pot_counts=pot_counts,
+                    supercell_dims=supercell_dims,
                     lat_c=lat_c,
-                    settings=settings
+                    settings=settings,
+                    use_pair_bonding=use_pair_bonding,
+                    stacking_type=stacking_type
                 )
 
         lat_c = lat_c or initial_guess
@@ -436,8 +489,7 @@ def stack_multilayer_sheet(
         if pot_file.exists():
             pot_file.unlink()
 
-    return output_path, lat_c
-
+    return lat_c
 
 def build_tip(
     config: TipConfig,
@@ -505,7 +557,7 @@ def build_substrate(
     build_dir: Path,
     box_dims: dict,
     settings: Optional[GlobalSettings] = None
-) -> Path:
+    ) -> Path:
     """Build substrate slab.
     
     Args:
@@ -518,8 +570,6 @@ def build_substrate(
     Returns:
         Path to substrate file.
     """
-    if config.amorph == 'a':
-        assert settings is not None, "settings required for amorphous substrate"
 
     cif_path = get_material_path(config.cif_path, 'cif')
     base_lmp = Path(tempfile.gettempdir()) / f"{config.mat}_{uuid.uuid4().hex[:8]}_base.lmp"
@@ -560,26 +610,103 @@ def build_substrate(
     base_lmp.unlink()
     return final_lmp
 
+def apply_langevin_regions(
+    component_name: str,
+    component_path: Path,
+    config: ComponentConfig,
+    settings: GlobalSettings,
+    component_height: float,
+    substrate_thickness: Optional[float] = None
+) -> Path:
+    """Apply Langevin thermostat region splitting to a component.
+    
+    Splits a component (tip or substrate) into three spatial regions:
+    - fix: Bottom region (fixed atoms)
+    - thermo: Middle region (thermalized atoms)
+    - normal: Top region (mobile atoms)
+    
+    Each original atom type gets expanded to 3 types (normal, fix, thermo).
+    Generates appropriate mass and potential commands.
+    
+    Args:
+        component_name: Name of component ('tip' or 'sub').
+        component_path: Path to the component LAMMPS data file.
+        config: Component configuration with potential info.
+        settings: Global simulation settings with langevin_boundaries.
+        component_height: Height of component (tip_height or substrate thickness).
+        substrate_thickness: Required if component_name='sub' to calculate boundaries.
+        
+    Returns:
+        Path to the modified component file with 3-region types.
+    """
+    num_types = get_num_atom_types(component_path)
+
+    boundaries = {}
+    if component_name == 'tip':
+        h = component_height
+        bounds_config = settings.thermostat.langevin_boundaries['tip']
+        boundaries['f_zlo'] = h - bounds_config['fix'][0]
+        boundaries['f_zhi'] = h - bounds_config['fix'][1]
+        boundaries['t_zlo'] = h - bounds_config['thermo'][0]
+        boundaries['t_zhi'] = h - bounds_config['thermo'][1]
+        boundaries['n_zhi'] = h
+    elif component_name == 'sub':
+        if substrate_thickness is None:
+            raise ValueError("substrate_thickness required for substrate component")
+        bounds_config = settings.thermostat.langevin_boundaries['sub']
+        boundaries['f_zlo'] = bounds_config['fix'][0] * substrate_thickness
+        boundaries['f_zhi'] = bounds_config['fix'][1] * substrate_thickness
+        boundaries['t_zlo'] = bounds_config['thermo'][0] * substrate_thickness
+        boundaries['t_zhi'] = bounds_config['thermo'][1] * substrate_thickness
+        boundaries['n_zhi'] = substrate_thickness
+    else:
+        raise ValueError(f"Unknown component name: {component_name}")
+
+    pm = PotentialManager(settings, use_langevin=True)
+    pm.register_component(component_name, config)
+    base_elements = pm.components[component_name]['elements']
+    expanded_elements = [elem for elem in base_elements for _ in range(3)]
+    potential_commands = pm.get_single_component_commands(config, expanded_elements)
+
+    jinja_env = Environment(
+        loader=PackageLoader('src.templates'),
+        trim_blocks=True,
+        lstrip_blocks=True
+    )
+
+    context = {
+        'component_name': component_name,
+        'input_path': component_path,
+        'num_types': num_types,
+        'boundaries': boundaries,
+        'potential_commands': potential_commands
+    }
+
+    template = jinja_env.get_template('common/apply_langevin_regions.lmp')
+    commands = template.render(context).strip().split('\n')
+    commands = [cmd.strip() for cmd in commands if cmd.strip() and not cmd.strip().startswith('#')]
+
+    run_lammps_commands(commands)
+
+    return component_path
+
 def build_monolayer(
     config: SheetConfig,
     atomsk: AtomskWrapper,
-    build_dir: Path,
-    settings: Optional[GlobalSettings] = None
-) -> Tuple[Path, dict, float, dict, int]:
+) -> Tuple[Path, dict, dict, int, Dict[str, float]]:
     """Build single-layer 2D material sheet.
     
     Args:
         config: Sheet configuration.
         atomsk: AtomskWrapper instance.
         build_dir: Output directory.
-        settings: Global simulation settings.
         
     Returns:
-        Tuple of (path, box_dims, lat_c, pot_counts, total_types).
+        Tuple of (path, box_dims, pot_counts, total_types, supercell_dims).
     """
     cif_path = get_material_path(config.cif_path, 'cif')
     pot_path = get_material_path(config.pot_path, config.pot_type)
-    base_path = build_dir / f"{config.mat}_1.lmp"
+    base_path = Path(tempfile.gettempdir()) / f"{config.mat}_1_{uuid.uuid4().hex[:8]}.lmp"
 
     cif_data = cifread(cif_path)
     pot_counts = count_atomtypes(pot_path, cif_data['elements'])
@@ -619,10 +746,12 @@ def build_monolayer(
             dims = get_model_dimensions(ortho_cell)
 
     dims_calc = get_model_dimensions(ortho_cell)
-    assert all(dims_calc[k] is not None for k in ['xhi', 'xlo', 'yhi', 'ylo'])
+    dims_calc_typed: Dict[str, float] = {k: cast(float, v) for k, v in dims_calc.items()}
 
-    unit_x = cast(float, dims_calc['xhi']) - cast(float, dims_calc['xlo'])
-    unit_y = cast(float, dims_calc['yhi']) - cast(float, dims_calc['ylo'])
+    supercell_dims = dims_calc_typed.copy()
+
+    unit_x = cast(float, dims_calc_typed['xhi']) - cast(float, dims_calc_typed['xlo'])
+    unit_y = cast(float, dims_calc_typed['yhi']) - cast(float, dims_calc_typed['ylo'])
 
     target_x = config.x[0] if isinstance(config.x, list) else config.x
     target_y = config.y[0] if isinstance(config.y, list) else config.y
@@ -640,10 +769,7 @@ def build_monolayer(
     if config.pot_type in ['tersoff', 'sw', 'rebo', 'airebo']:
         atomsk.charge2atom(base_path)
 
-    lat_c = config.lat_c or (settings.geometry.lat_c_default if settings else 6.0)
-
-    return base_path, dims, lat_c, pot_counts, total_pot_types
-
+    return base_path, dims, pot_counts, total_pot_types, supercell_dims
 
 def build_sheet(
     config: SheetConfig,
@@ -651,8 +777,10 @@ def build_sheet(
     build_dir: Path,
     stack_if_multi: bool = False,
     settings: Optional[GlobalSettings] = None,
-    n_layers_override: Optional[int] = None
-) -> Tuple[Path, dict, float]:
+    n_layers_override: Optional[int] = None,
+    use_pair_bonding: bool = False,
+    stacking_type: str = 'AB'
+) -> Tuple[Path, dict, Optional[float]]:
     """Build 2D material sheet (single or multi-layer).
     
     Args:
@@ -662,21 +790,21 @@ def build_sheet(
         stack_if_multi: If True, stack multiple layers.
         settings: Global settings (required for multi-layer).
         n_layers_override: Override layer count.
+        use_pair_bonding: If True, use pair bonding stacking (for sheetonsheet).
+        stacking_type: Stacking type ('AA' or 'AB'). AA has no shifts, AB has shifts.
         
     Returns:
         Tuple of (path, box_dims, lat_c).
     """
-    base_path, dims, lat_c, pot_counts, total_pot_types = build_monolayer(
-        config, atomsk, build_dir, settings
+    base_path, dims, pot_counts, total_pot_types, supercell_dims = build_monolayer(
+        config, atomsk
     )
 
     n_layers = n_layers_override or (max(config.layers) if config.layers else 1)
-
+    stacked_path = build_dir / f"{config.mat}_{n_layers}.lmp"
+    lat_c = config.lat_c
     if stack_if_multi and n_layers > 1:
-        assert settings is not None, "settings required for multi-layer stacking"
-        stacked_path = build_dir / f"{config.mat}_{n_layers}.lmp"
-
-        stacked_path, lat_c = stack_multilayer_sheet(
+        lat_c = stack_multilayer_sheet(
             base_layer_path=base_path,
             config=config,
             output_path=stacked_path,
@@ -684,10 +812,14 @@ def build_sheet(
             n_layers=n_layers,
             types_per_layer=total_pot_types,
             pot_counts=pot_counts,
+            supercell_dims=supercell_dims,
             lat_c=lat_c,
-            settings=settings
+            settings=settings,
+            use_pair_bonding=use_pair_bonding,
+            stacking_type=stacking_type
         )
-        base_path.unlink()
         return stacked_path, dims, lat_c
 
-    return base_path, dims, lat_c
+    if n_layers == 1:
+        shutil.copy(base_path, stacked_path)
+    return stacked_path, dims, lat_c

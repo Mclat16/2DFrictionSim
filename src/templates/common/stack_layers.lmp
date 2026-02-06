@@ -14,8 +14,8 @@ create_box {{ total_types }} box
 # Read and stack layers
 {% for layer_idx in range(n_layers) %}
 read_data {{ base_layer_path }} add append shift 0 0 {{ layer_shifts[layer_idx] }} group layer_{{ layer_idx + 1 }}
-{% if layer_idx > 0 and (shift_x != 0 or shift_y != 0) %}
-displace_atoms layer_{{ layer_idx + 1 }} move {{ shift_x * layer_idx }} {{ shift_y * layer_idx }} 0 units box
+{% if layer_idx > 0 %}
+displace_atoms layer_{{ layer_idx + 1 }} move {{ layer_shifts_x[layer_idx] }} {{ layer_shifts_y[layer_idx] }} 0 units box
 {% endif %}
 {% endfor %}
 
@@ -51,10 +51,10 @@ min_style {{ min_style }}
 timestep {{ timestep }}
 compute l1_com layer_1 com
 compute l2_com layer_2 com
+run 0
 variable z1 equal c_l1_com[3]
 variable z2 equal c_l2_com[3]
 variable lat_c equal v_z2-v_z1
-run 0
 {% endif %}
 
 # Write final structure

@@ -19,6 +19,7 @@ from jinja2 import Environment
 from src.interfaces.atomsk import AtomskWrapper
 from src.interfaces.jinja import PackageLoader
 from src.core.config import get_material_path, get_potential_path
+from src.hpc import HPCScriptGenerator, HPCConfig
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class SimulationBase(ABC):
         self.relative_run_dir = Path(output_dir)
         self.output_dir = Path(output_dir).resolve()
         self.config_path = Path(config_path).resolve() if config_path else None
+        self.base_output_dir: Optional[Path] = None
         self.atomsk = AtomskWrapper()
 
         self.jinja_env = Environment(
@@ -59,16 +61,18 @@ class SimulationBase(ABC):
             lstrip_blocks=True
         )
 
-    def _create_directories(self, subdirs: Optional[List[str]] = None) -> None:
+    def _create_directories(self, output_dir: Optional[Path] = None, subdirs: Optional[List[str]] = None) -> None:
         """Creates standard simulation subdirectories.
 
         Args:
+            output_dir: Directory in which to create subdirectories. Defaults to self.output_dir.
             subdirs: Optional list of additional subdirectories to create.
-                    Defaults to ['visuals', 'results', 'lammps', 'data', 'build'].
+                    Defaults to ['visuals', 'results', 'lammps', 'data'].
         """
+        target_dir = output_dir if output_dir is not None else self.output_dir
         default_dirs = ['visuals', 'results', 'lammps', 'data']
         for d in default_dirs + (subdirs or []):
-            (self.output_dir / d).mkdir(parents=True, exist_ok=True)
+            (target_dir / d).mkdir(parents=True, exist_ok=True)
 
     def render_template(self, template_name: str,
                         context: Dict[str, Any]) -> str:
@@ -89,17 +93,19 @@ class SimulationBase(ABC):
             raise
 
     def write_file(self, filename: Union[str, Path],
-                    content: str) -> Path:
+                    content: str, output_dir: Optional[Union[str, Path]] = None) -> Path:
         """Write string content to a file in the output directory.
 
         Args:
             filename: Relative path or filename (e.g., 'lammps/system.in').
             content: The string content to write.
+            output_dir: Optional custom output directory. Defaults to self.output_dir.
 
         Returns:
             The full path to the written file.
         """
-        full_path = self.output_dir / filename
+        target_dir = Path(output_dir) if output_dir is not None else self.output_dir
+        full_path = target_dir / filename
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content)
         return full_path
@@ -130,7 +136,6 @@ class SimulationBase(ABC):
 
         prov_dir = self.output_dir / 'provenance'
 
-        # Auto-detect category
         if category == 'auto':
             ext = file_path.suffix.lower()
             if ext == '.cif':
@@ -140,7 +145,6 @@ class SimulationBase(ABC):
             else:
                 category = 'other'
 
-        # Determine destination directory
         if category == 'cif':
             dest_dir = prov_dir / 'cif'
         elif category == 'potential':
@@ -269,3 +273,88 @@ class SimulationBase(ABC):
                 self.add_to_provenance(pot, 'potential', component=component_name)
             except (FileNotFoundError, ValueError, KeyError):
                 pass
+
+    def _generate_hpc_scripts(self) -> None:
+        """Generate HPC job submission scripts for all simulations.
+        
+        This method should be called after all simulation files are written.
+        It collects simulation paths and generates appropriate HPC scripts.
+        """
+
+        hpc_dir = self._get_hpc_output_dir()
+        hpc_dir.mkdir(parents=True, exist_ok=True)
+
+        simulation_paths = self._collect_simulation_paths()
+
+        if not simulation_paths:
+            logger.warning("No simulations found for HPC script generation")
+            return
+
+        job_name = self._get_hpc_job_name()
+
+        hpc_config = HPCConfig.from_settings(
+            self.config.settings.hpc,
+            job_name=job_name
+        )
+
+        generator = HPCScriptGenerator(hpc_config)
+
+        base_dir = '$PBS_O_WORKDIR' if hpc_config.scheduler_type == 'pbs' else '$SLURM_SUBMIT_DIR'
+
+        scripts = generator.generate_scripts(
+            simulation_paths=simulation_paths,
+            output_dir=hpc_dir,
+            scheduler=self.config.settings.hpc.scheduler_type,
+            base_dir=base_dir,
+            log_dir='$HOME/logs'
+        )
+
+        logger.info("Generated %d HPC scripts in %s", len(scripts), hpc_dir)
+
+    def _get_hpc_output_dir(self) -> Path:
+        """Get the output directory for HPC scripts.
+        
+        Override this method if you need custom HPC script location.
+        Default is output_dir/hpc for single simulations,
+        or base_output_dir/hpc for multi-simulation setups.
+        
+        Returns:
+            Path to HPC scripts directory
+        """
+        if self.base_output_dir is not None:
+            return self.base_output_dir / 'hpc'
+        return self.output_dir / 'hpc'
+
+    def _get_hpc_job_name(self) -> str:
+        """Get the job name for HPC scripts.
+        
+        Override this method to customize job names.
+        
+        Returns:
+            Job name string
+        """
+        material = getattr(self.config, 'sheet', None) or getattr(self.config, '2D', None)
+        if material and hasattr(material, 'mat'):
+            return f"friction_{material.mat}"
+        return "friction2d"
+
+    def _collect_simulation_paths(self) -> List[str]:
+        """Collect all simulation directory paths relative to HPC base.
+        
+        Override this method for custom simulation directory structures.
+        Default implementation looks for directories with lammps/ subdirectory.
+        
+        Returns:
+            List of relative paths to simulation directories
+        """
+        base_dir = self.base_output_dir if self.base_output_dir is not None else self.output_dir
+
+        paths = []
+        for item in base_dir.iterdir():
+            if item.is_dir():
+                lammps_dir = item / 'lammps'
+                if lammps_dir.exists() and (lammps_dir / 'system.in').exists():
+                    rel_path = item.relative_to(base_dir)
+                    paths.append(str(rel_path))
+
+        return sorted(paths)

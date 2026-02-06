@@ -13,16 +13,16 @@ Interlayer interactions:
 
 import logging
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 from src.core.simulation_base import SimulationBase
 from src.core.config import SheetOnSheetSimulationConfig
 from src.core.potential_manager import PotentialManager
+from src.core.utils import atomic2molecular
 from src.builders import components
 
 logger = logging.getLogger(__name__)
 
-# Standard 4-layer model configuration is hardcoded
 N_LAYERS = 4
 
 class SheetOnSheetSimulation(SimulationBase):
@@ -57,25 +57,37 @@ class SheetOnSheetSimulation(SimulationBase):
         self._init_provenance()
 
         logger.info("Building %d-layer sheet stack...", N_LAYERS)
+        stacking_type = getattr(self.config.sheet, 'stack_type', 'AB')
         sheet_path, dims, lat_c = components.build_sheet(
             self.config.sheet, self.atomsk, build_dir,
             stack_if_multi=True, settings=self.config.settings,
-            n_layers_override=N_LAYERS
+            n_layers_override=N_LAYERS, use_pair_bonding=True,
+            stacking_type=stacking_type
         )
         self.structure_paths['sheet'] = sheet_path
 
         self.pm = self._generate_potentials()
-
-        self.z_positions['layer_1'] = 0.0
-        self.z_positions['layer_2'] = lat_c
-        self.z_positions['layer_3'] = 2 * lat_c
-        self.z_positions['layer_4'] = 3 * lat_c
+        assert lat_c is not None
+        for i in range(N_LAYERS):
+            self.z_positions[f'layer_{i+1}'] = i * lat_c
 
         self.lat_c = lat_c
         self.sheet_dims = dims
 
         self.write_inputs()
+        self._generate_hpc_scripts()
         logger.info("Build complete.")
+
+    def _get_hpc_job_name(self) -> str:
+        """Get sheet-on-sheet specific job name."""
+        return f"sheet_{self.config.sheet.mat}"
+
+    def _collect_simulation_paths(self) -> List[str]:
+        """Sheet-on-sheet has single simulation directory."""
+        lammps_dir = self.output_dir / 'lammps'
+        if lammps_dir.exists():
+            return ['.']
+        return []
 
     def _init_provenance(self) -> None:
         """Initialize provenance folder and collect input files."""
@@ -101,6 +113,9 @@ class SheetOnSheetSimulation(SimulationBase):
 
         pm.register_component('sheet', self.config.sheet, n_layers=N_LAYERS)
 
+        if self.config.settings.simulation.drive_method == 'virtual_atom':
+            pm.register_virtual_atom()
+
         pm.add_self_interaction('sheet')
 
         pm.add_ghost_lj('sheet', max_real_distance=1)
@@ -114,7 +129,7 @@ class SheetOnSheetSimulation(SimulationBase):
                 'sheet', layer
             )
 
-        self.groups['center'] = f"{self.groups['layer_2']} {self.groups['layer_3']}"
+        self.groups['center'] = ' '.join([self.groups[f'layer_{i}'] for i in range(2, N_LAYERS)])
         self.groups['all_types'] = pm.types.get_group_string('sheet')
 
         return pm
@@ -128,31 +143,23 @@ class SheetOnSheetSimulation(SimulationBase):
         assert self.lat_c is not None
 
         total_types = len(self.pm.types) if self.pm else 0
-        virtual_atom_type = total_types + 1
 
         sim = self.config.settings.simulation
         out = self.config.settings.output
 
-        def _normalize_speed(speed):
-            if speed is None:
-                return 0.0
-            if isinstance(speed, (int, float)):
-                return speed / 100
-            if isinstance(speed, list):
-                return [s / 100 for s in speed]
-            raise TypeError(f"Unsupported scan_speed type: {type(speed)}")
-
         rel_run_dir_str = str(self.relative_run_dir)
+        atomic2molecular(f"{self.output_dir}/build/{self.structure_paths['sheet'].name}")
 
         context = {
             'temp': self.config.general.temp,
             'pressures': self.config.general.pressure,
-            'angles': self.config.general.scan_angle,
-            'scan_speeds': _normalize_speed(self.config.general.scan_speed),
+            'scan_angle_config': self.config.general.scan_angle,
+            'scan_speed_config': self.config.general.scan_speed,
             'xlo': self.sheet_dims.get('xlo', 0.0),
             'xhi': self.sheet_dims.get('xhi', 100.0),
             'ylo': self.sheet_dims.get('ylo', 0.0),
             'yhi': self.sheet_dims.get('yhi', 100.0),
+            'zhi': self.sheet_dims.get('zhi', 15.0),
             'data_file': f"{rel_run_dir_str}/build/{self.structure_paths['sheet'].name}",
             'potential_file': f"{rel_run_dir_str}/lammps/system.in.settings",
             'num_atom_types': total_types,
@@ -165,11 +172,10 @@ class SheetOnSheetSimulation(SimulationBase):
             'n_layers': N_LAYERS,
             'lat_c': self.lat_c,
             'sheet_dims': self.sheet_dims,
-            'bond_spring_ev': ((self.config.general.bond_spring or 5.0) /
-                                16.02),
-            'bond_min': self.lat_c * 0.8,
-            'bond_max': self.lat_c * 1.2,
-            'driving_spring_ev': ((self.config.general.driving_spring or 50.0) / 16.02),
+            'bond_spring_ev': ((self.config.general.bond_spring or 80.0) / 16.02176565  ),
+            'bond_min': self.lat_c - 0.15,
+            'bond_max': self.lat_c + 0.15,
+            'driving_spring_ev': ((self.config.general.driving_spring or 50.0) / 16.02176565),
             'timestep': sim.timestep,
             'thermo': sim.thermo,
             'neighbor_list': sim.neighbor_list,
@@ -181,10 +187,9 @@ class SheetOnSheetSimulation(SimulationBase):
             'dump_freq': out.dump_frequency.get('slide', 1000),
             'dump_enabled': out.dump.get('slide', False),
             'results_file_pattern': (f"{rel_run_dir_str}/results/"
-                                    f"friction_p${{pressure}}_a${{a}}.dat"),
+                                    f"friction_p${{pressure}}_a${{a}}_s${{speed}}"),
             'dump_file_pattern': (f"{rel_run_dir_str}/visuals/"
-                                    f"slide_p${{pressure}}_a${{a}}.*.dump"),
-            'virtual_atom_type': virtual_atom_type,
+                                    f"slide_p${{pressure}}_a${{a}}_s${{speed}}.lammpstrj"),
             'drive_method': sim.drive_method,
             'thermostat_type': self.config.settings.thermostat.type,
         }

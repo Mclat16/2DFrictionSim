@@ -1,0 +1,39 @@
+# LAMMPS commands for splitting component into Langevin thermostat regions
+# Generated from template: apply_langevin_regions.lmp
+
+units metal
+atom_style atomic
+boundary p p p
+
+read_data {{ input_path }} extra/atom/types {{ num_types * 2 }}
+
+{% for cmd in potential_commands %}
+{{ cmd }}
+{% endfor %}
+
+region          {{ component_name }}_fix_region block INF INF INF INF {{ boundaries.f_zlo }} {{ boundaries.f_zhi }}
+region          {{ component_name }}_thermo_region block INF INF INF INF {{ boundaries.t_zlo }} {{ boundaries.t_zhi }}
+
+group           {{ component_name }}_fix region {{ component_name }}_fix_region
+group           {{ component_name }}_thermo region {{ component_name }}_thermo_region
+
+# Assign new atom types for each original type (fix, thermo)
+{% for t in range(1, num_types + 1) %}
+group {{ component_name }}_{{ t }} type {{ t }}
+{% endfor %}
+
+{% for t in range(1, num_types + 1) %}
+{% set type_normal = (t - 1) * 3 + 1 %}
+{% set type_fix = (t - 1) * 3 + 2 %}
+{% set type_thermo = (t - 1) * 3 + 3 %}
+set group {{ component_name }}_{{ t }} type {{ type_normal }}
+group {{ component_name }}_fix_{{ t }} intersect {{ component_name }}_fix {{ component_name }}_{{ t }}
+set group {{ component_name }}_fix_{{ t }} type {{ type_fix }}
+group {{ component_name }}_fix_{{ t }} delete
+group {{ component_name }}_thermo_{{ t }} intersect {{ component_name }}_thermo {{ component_name }}_{{ t }}
+set group {{ component_name }}_thermo_{{ t }} type {{ type_thermo }}
+group {{ component_name }}_thermo_{{ t }} delete
+group {{ component_name }}_{{ t }} delete
+{% endfor %}
+
+write_data {{ input_path }}
