@@ -109,7 +109,11 @@ variable        yfrict equal c_frict[2]
 
 run             10000
 
-variable        r0_new equal ${comz_top}-${comz_ctop}
+thermo_style    custom v_comz_top v_comz_ctop
+run             0
+thermo_style    multi
+
+variable        r0_new equal v_comz_top-v_comz_ctop
 bond_coeff      1 {{ bond_spring_ev }} ${r0_new}
 
 velocity        layer_4 set 0.0 0.0 0.0 units box

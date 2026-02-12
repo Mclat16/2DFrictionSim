@@ -683,7 +683,6 @@ class PotentialManager:
         Returns:
             String with mass commands, one per line.
         """
-        # Group types by element
         element_types: Dict[str, List[int]] = defaultdict(list)
         for atype in self.types:
             element_types[atype.element].append(atype.type_id)
@@ -750,22 +749,18 @@ class PotentialManager:
         lines = []
         has_langevin = False
         langevin_thermo_groups = []
-        
         for comp in self.components.values():
             name = comp['name']
             n_layers = comp['n_layers']
             use_langevin = comp.get('use_langevin', False)
 
-            # Get all types for this component
             all_types = self.types.ids_by_component(name)
 
             if name == 'sheet':
-                # Sheet component uses '2D_all' as group name
                 if all_types:
                     types_str = ' '.join(map(str, all_types))
                     lines.append(f"group 2D_all type {types_str}")
 
-                # Add layer groups for multi-layer sheets
                 if n_layers > 1:
                     for layer in range(n_layers):
                         layer_types = self.types.get_layer_group_string(name, layer)
@@ -775,12 +770,11 @@ class PotentialManager:
             elif use_langevin and name in ('tip', 'sub'):
                 # Langevin components: split into all, fix, thermo
                 has_langevin = True
-                
-                # Get types by region
+
                 normal_types = []
                 fix_types = []
                 thermo_types = []
-                
+
                 for atype in self.types:
                     if atype.component == name:
                         if atype.region is None:
@@ -789,30 +783,28 @@ class PotentialManager:
                             fix_types.append(atype.type_id)
                         elif atype.region == 'thermo':
                             thermo_types.append(atype.type_id)
-                
+
                 if all_types:
                     types_str = ' '.join(map(str, sorted(all_types)))
                     lines.append(f"group {name}_all type {types_str}")
-                
+
                 if fix_types:
                     types_str = ' '.join(map(str, sorted(fix_types)))
                     lines.append(f"group {name}_fix type {types_str}")
-                
+
                 if thermo_types:
                     types_str = ' '.join(map(str, sorted(thermo_types)))
                     lines.append(f"group {name}_thermo type {types_str}")
                     langevin_thermo_groups.append(f"{name}_thermo")
-            
+
             else:
-                # Standard component without Langevin
                 if all_types:
                     types_str = ' '.join(map(str, all_types))
                     lines.append(f"group {name}_all type {types_str}")
-        
-        # Add mobile group as union of all thermo regions
+
         if has_langevin and langevin_thermo_groups:
             lines.append(f"group mobile union {' '.join(langevin_thermo_groups)}")
-        
+
         return "\n".join(lines)
 
     def write_file(self, output_path: Path):
@@ -821,7 +813,6 @@ class PotentialManager:
         Args:
             output_path: Path for the output file (e.g., system.in.settings).
         """
-        # Build pair_style line
         style_parts = []
         for pot_type, count in self.potential_usage.items():
             for _ in range(count):

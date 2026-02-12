@@ -30,6 +30,7 @@ class JobEntry:
     # Identification
     job_id: str                  # Unique identifier (e.g., "afm_h-MoS2_L1_F5_A0")
     simulation_path: str         # Relative path to simulation directory
+    lammps_script: Optional[str] = None  # Optional script name (e.g. slide_20ms.in)
     
     # Simulation parameters (for quick reference)
     material: str = ""
@@ -306,7 +307,7 @@ class JobManifest:
             'package_directory': self.package_directory,
             'jobs': [job.to_dict() for job in self.jobs],
         }
-        filepath.write_text(json.dumps(data, indent=2))
+        filepath.write_text(json.dumps(data, indent=2), encoding='utf-8')
     
     @classmethod
     def load(cls, filepath: Path) -> 'JobManifest':
@@ -319,7 +320,7 @@ class JobManifest:
             Loaded JobManifest instance
         """
         filepath = Path(filepath)
-        data = json.loads(filepath.read_text())
+        data = json.loads(filepath.read_text(encoding='utf-8'))
         
         jobs = [JobEntry.from_dict(j) for j in data.pop('jobs', [])]
         
@@ -378,17 +379,38 @@ class JobManifest:
             if layer_match:
                 layers = int(layer_match.group(1))
             
-            # Create job ID
-            job_id = path_str.replace('/', '_').replace('-', '_')
-            
-            entry = JobEntry(
-                job_id=job_id,
-                simulation_path=str(rel_path),
-                material=material,
-                layers=layers,
-            )
-            
-            manifest.add_job(entry)
+            lammps_scripts = sorted(p.name for p in lammps_dir.glob('slide*.in'))
+
+            if not lammps_scripts:
+                # Backward-compatible fallback: one job per simulation directory
+                job_id = path_str.replace('/', '_').replace('-', '_')
+                entry = JobEntry(
+                    job_id=job_id,
+                    simulation_path=str(rel_path),
+                    material=material,
+                    layers=layers,
+                )
+                manifest.add_job(entry)
+                continue
+
+            for script_name in lammps_scripts:
+                script_tag = Path(script_name).stem.replace('-', '_')
+                job_id = f"{path_str}_{script_tag}".replace('/', '_').replace('-', '_')
+
+                speed = 2.0
+                speed_match = re.match(r"slide_([0-9]+(?:p[0-9]+)?)ms", Path(script_name).stem)
+                if speed_match:
+                    speed = float(speed_match.group(1).replace('p', '.'))
+
+                entry = JobEntry(
+                    job_id=job_id,
+                    simulation_path=str(rel_path),
+                    lammps_script=script_name,
+                    material=material,
+                    layers=layers,
+                    speed=speed,
+                )
+                manifest.add_job(entry)
         
         return manifest
     

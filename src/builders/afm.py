@@ -127,7 +127,6 @@ class AFMSimulation(SimulationBase):
         )
         logger.info("Built substrate: %s", sub_path.name)
 
-        # Apply Langevin thermostat region splitting if enabled
         if self.config.settings.thermostat.type == 'langevin':
             tip_height = tip_radius / self.config.settings.geometry.tip_reduction_factor
 
@@ -324,7 +323,7 @@ class AFMSimulation(SimulationBase):
             'virtual_offset': self.config.tip.r * 1.5, 
             'results_freq': out.results_frequency,
             'dump_freq': out.dump_frequency.get('slide', 1000),
-            'tip_fix_group': 'tip',
+            'tip_fix_group': 'tip_all' if self.config.settings.geometry.rigid_tip else 'tip_fix',
             'layer_group': 'sheet',
             'n_sheet_layers': n_layers,
             'lat_c': lat_c,

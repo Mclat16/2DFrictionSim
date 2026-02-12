@@ -6,19 +6,16 @@ Unified CLI for simulation execution, HPC script generation, and AiiDA integrati
 import logging
 import sys
 import shutil
-import itertools
+import tarfile
 from pathlib import Path
-from copy import deepcopy
-from typing import List, Dict, Any, Optional
-from importlib import resources
+from typing import List, Dict, Any, Optional, cast, NoReturn
+from importlib import resources as pkg_resources
+from datetime import datetime
 import yaml
 import click
 
-from src.core.config import (
-    parse_config, AFMSimulationConfig, SheetOnSheetSimulationConfig, 
-    load_settings)
-from src.builders.afm import AFMSimulation
-from src.builders.sheetonsheet import SheetOnSheetSimulation
+from src.core.config import load_settings
+from src.core.run import run_simulations, _build_hpc_manifest_entries
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,75 +24,61 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def expand_config_sweeps(base_config: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Expand config with material lists and parameter sweeps.
 
-    Args:
-        base_config: Base configuration dictionary.
+def _ensure_hpc_settings(hpc_settings) -> None:
+    """Ensure required HPC settings are set, prompting when missing."""
+    if not getattr(hpc_settings, 'log_dir', None):
+        hpc_settings.log_dir = click.prompt(
+            "Absolute path for HPC log files",
+            type=str
+        )
 
-    Returns:
-        List of expanded single-run configurations.
-    """
-    sweep_params = {}
+    if not getattr(hpc_settings, 'modules', None):
+        modules_raw = click.prompt(
+            "Modules to load (comma-separated)",
+            type=str
+        )
+        hpc_settings.modules = [
+            m.strip() for m in modules_raw.split(',') if m.strip()
+        ]
 
-    def resolve_materials_list(section_config: Dict[str, Any]) -> List[str]:
-        """Read materials_list file if present."""
-        if 'materials_list' not in section_config:
-            return []
+    if getattr(hpc_settings, 'use_tmpdir', False) and not getattr(hpc_settings, 'scratch_dir', None):
+        hpc_settings.scratch_dir = click.prompt(
+            "Scratch directory (e.g. $EPHEMERAL or $TMPDIR)",
+            type=str,
+            default="$TMPDIR"
+        )
 
-        mat_list_path = section_config.get('materials_list', '')
-        if isinstance(mat_list_path, str) and mat_list_path.endswith(".txt"):
-            path = Path(mat_list_path)
-            if path.exists():
-                with open(path, 'r', encoding='utf-8') as f:
-                    return [line.strip() for line in f if line.strip()]
-            logger.warning("Material list file %s not found.", path)
-        return []
 
-    def expand_mat_template(section_config: Dict[str, Any], mat_value: str) -> Dict[str, Any]:
-        """Replace {mat} placeholders with material name."""
-        expanded = {}
-        for key, val in section_config.items():
-            if key == 'materials_list':
-                continue
-            if isinstance(val, str) and '{mat}' in val:
-                expanded[key] = val.replace('{mat}', mat_value)
-            else:
-                expanded[key] = val
-        return expanded
+def _run_simulation(model: str, config_file: str, output_dir: str,
+                    use_aiida: bool, generate_hpc: bool,
+                    hpc_name: Optional[str], run_local: bool):
+    _ = (hpc_name, run_local)
 
-    if '2D' in base_config:
-        materials = resolve_materials_list(base_config['2D'])
-        if materials:
-            sweep_params[('2D', '_material_expand')] = materials
+    if use_aiida:
+        from src.aiida import AIIDA_AVAILABLE
+        if not AIIDA_AVAILABLE:
+            click.echo("⚠️  AiiDA not available. Install with:", err=True)
+            click.echo("   conda install -c conda-forge aiida-core", err=True)
+            raise click.Abort()
 
-    lammps_loop_params = {'force', 'scan_angle', 'pressure', 'scan_speed'}
+    created_simulations, simulation_root, configs_to_run, defaults = run_simulations(
+        config_file=config_file,
+        model=model,
+        output_root=Path(output_dir),
+        ensure_hpc_settings=_ensure_hpc_settings,
+        use_aiida=use_aiida,
+        generate_hpc=generate_hpc,
+    )
 
-    if 'general' in base_config:
-        for key, val in base_config['general'].items():
-            if isinstance(val, list) and key not in lammps_loop_params:
-                sweep_params[('general', key)] = val
+    click.echo(f"📋 Found {len(configs_to_run)} simulation configurations")
 
-    if not sweep_params:
-        return [base_config]
+    if created_simulations and use_aiida:
+        click.echo(f"\n📦 Registering {len(created_simulations)} simulations in AiiDA...")
+        _register_simulations_aiida(created_simulations, Path(config_file))
 
-    keys, values = zip(*sweep_params.items())
-    permutations = [dict(zip(keys, v)) for v in itertools.product(*values)]
-
-    expanded_configs = []
-    for perm in permutations:
-        new_conf = deepcopy(base_config)
-
-        mat_value = perm.pop(('2D', '_material_expand'), None)
-        if mat_value and '2D' in new_conf:
-            new_conf['2D'] = expand_mat_template(new_conf['2D'], mat_value)
-
-        for (section, key), val in perm.items():
-            new_conf[section][key] = val
-
-        expanded_configs.append(new_conf)
-
-    return expanded_configs
+    click.echo(f"\n✅ Generation complete: {len(created_simulations)}/{len(configs_to_run)} successful")
+    click.echo(f"📂 Output directory: {simulation_root.absolute()}")
 
 # =============================================================================
 # MAIN CLI GROUP
@@ -105,7 +88,7 @@ def expand_config_sweeps(base_config: Dict[str, Any]) -> List[Dict[str, Any]]:
 @click.version_option(version='0.1.0', prog_name='FrictionSim2D')
 def cli():
     """FrictionSim2D - Generate LAMMPS input files for 2D material friction simulations."""
-    pass
+
 
 # =============================================================================
 # RUN COMMANDS
@@ -114,7 +97,7 @@ def cli():
 @cli.group('run')
 def run_group():
     """Run friction simulations."""
-    pass
+
 
 @run_group.command('afm')
 @click.argument('config_file', type=click.Path(exists=True))
@@ -122,12 +105,14 @@ def run_group():
               help='Output directory for generated files')
 @click.option('--aiida', 'use_aiida', is_flag=True,
               help='Enable AiiDA provenance tracking')
+@click.option('--hpc-scripts', 'generate_hpc', is_flag=True,
+                            help='Generate HPC scripts for the simulation root')
 @click.option('--hpc', 'hpc_name', type=str, default=None,
               help='HPC configuration name (overrides settings)')
 @click.option('--local', 'run_local', is_flag=True,
               help='Mark as local run (no HPC submission)')
 def run_afm(config_file: str, output_dir: str, use_aiida: bool, 
-            hpc_name: Optional[str], run_local: bool):
+                        generate_hpc: bool, hpc_name: Optional[str], run_local: bool):
     """Generate AFM simulation files.
     
     Creates all necessary LAMMPS input files, structures, and potentials
@@ -136,7 +121,9 @@ def run_afm(config_file: str, output_dir: str, use_aiida: bool,
     Example:
         FrictionSim2D run.afm afm_config.ini -o ./afm_output --aiida
     """
-    _run_simulation('afm', config_file, output_dir, use_aiida, hpc_name, run_local)
+    _run_simulation(
+        'afm', config_file, output_dir, use_aiida, generate_hpc, hpc_name, run_local
+    )
 
 @run_group.command('sheetonsheet')
 @click.argument('config_file', type=click.Path(exists=True))
@@ -144,12 +131,14 @@ def run_afm(config_file: str, output_dir: str, use_aiida: bool,
               help='Output directory for generated files')
 @click.option('--aiida', 'use_aiida', is_flag=True,
               help='Enable AiiDA provenance tracking')
+@click.option('--hpc-scripts', 'generate_hpc', is_flag=True,
+        help='Generate HPC scripts for the simulation root')
 @click.option('--hpc', 'hpc_name', type=str, default=None,
               help='HPC configuration name (overrides settings)')
 @click.option('--local', 'run_local', is_flag=True,
               help='Mark as local run (no HPC submission)')
 def run_sheetonsheet(config_file: str, output_dir: str, use_aiida: bool,
-                     hpc_name: Optional[str], run_local: bool):
+            generate_hpc: bool, hpc_name: Optional[str], run_local: bool):
     """Generate sheet-on-sheet simulation files.
     
     Creates all necessary LAMMPS input files for 4-layer sheet-on-sheet
@@ -158,94 +147,9 @@ def run_sheetonsheet(config_file: str, output_dir: str, use_aiida: bool,
     Example:
         FrictionSim2D run.sheetonsheet sheet_config.ini -o ./sheet_output
     """
-    _run_simulation('sheetonsheet', config_file, output_dir, use_aiida, hpc_name, run_local)
-
-def _run_simulation(model: str, config_file: str, output_dir: str,
-                   use_aiida: bool, hpc_name: Optional[str], run_local: bool):
-    """Internal function to run simulations."""
-    config_path = Path(config_file)
-    
-    if use_aiida:
-        from src.aiida import AIIDA_AVAILABLE
-        if not AIIDA_AVAILABLE:
-            click.echo("⚠️  AiiDA not available. Install with:", err=True)
-            click.echo("   conda install -c conda-forge aiida-core", err=True)
-            raise click.Abort()
-    
-    base_dict = parse_config(config_path)
-    defaults = load_settings()
-    
-    if use_aiida:
-        defaults.aiida.enabled = True
-        defaults.aiida.create_provenance = True
-    
-    configs_to_run = expand_config_sweeps(base_dict)
-    
-    click.echo(f"📋 Found {len(configs_to_run)} simulation configurations")
-    
-    created_simulations = []
-    
-    for i, run_dict in enumerate(configs_to_run):
-        run_dict['settings'] = defaults.dict()
-        
-        mat = run_dict['2D'].get('mat', 'unknown')
-        x = run_dict['2D'].get('x', 100)
-        y = run_dict['2D'].get('y', 100)
-        temp = run_dict['general'].get('temp', 300)
-        
-        if model == 'afm':
-            tip_mat = run_dict.get('tip', {}).get('mat', 'Si')
-            tip_amorph = run_dict.get('tip', {}).get('amorph', 'c')
-            tip_r = run_dict.get('tip', {}).get('r', 25)
-            sub_mat = run_dict.get('sub', {}).get('mat', 'Si')
-            sub_amorph = run_dict.get('sub', {}).get('amorph', 'a')
-            
-            sub_str = f"{sub_amorph}{sub_mat}" if sub_amorph == 'a' else sub_mat
-            tip_str = f"{tip_amorph}{tip_mat}" if tip_amorph == 'a' else tip_mat
-            
-            run_output_dir = (
-                Path(output_dir) / "afm" / mat / f"{x}x_{y}y" /
-                f"sub_{sub_str}_tip_{tip_str}_r{int(tip_r)}" / f"K{int(temp)}"
-            )
-        else:
-            run_output_dir = (
-                Path(output_dir) / "sheetonsheet" / mat / f"{x}x_{y}y" / f"K{int(temp)}"
-            )
-        
-        click.echo(f"\n🔧 [{i+1}/{len(configs_to_run)}] Building: {run_output_dir.name}")
-        
-        prov_dir = run_output_dir / 'provenance'
-        prov_dir.mkdir(parents=True, exist_ok=True)
-        
-        try:
-            if model == 'afm':
-                config_obj = AFMSimulationConfig(**run_dict)
-                per_run_config_path = prov_dir / 'config.json'
-                per_run_config_path.write_text(config_obj.model_dump_json(indent=2), encoding='utf-8')
-                builder = AFMSimulation(config_obj, str(run_output_dir), 
-                                       config_path=str(per_run_config_path))
-            else:
-                config_obj = SheetOnSheetSimulationConfig(**run_dict)
-                per_run_config_path = prov_dir / 'config.json'
-                per_run_config_path.write_text(config_obj.model_dump_json(indent=2), encoding='utf-8')
-                builder = SheetOnSheetSimulation(config_obj, str(run_output_dir),
-                                                config_path=str(per_run_config_path))
-            
-            builder.build()
-            created_simulations.append(run_output_dir)
-            click.echo(f"   ✅ Complete")
-            
-        except Exception as e:
-            click.echo(f"   ❌ Failed: {e}", err=True)
-            logger.exception("Build failed")
-            continue
-    
-    if created_simulations and use_aiida:
-        click.echo(f"\n📦 Registering {len(created_simulations)} simulations in AiiDA...")
-        _register_simulations_aiida(created_simulations, config_path)
-    
-    click.echo(f"\n✅ Generation complete: {len(created_simulations)}/{len(configs_to_run)} successful")
-    click.echo(f"📂 Output directory: {Path(output_dir).absolute()}")
+    _run_simulation(
+        'sheetonsheet', config_file, output_dir, use_aiida, generate_hpc, hpc_name, run_local
+    )
 
 def _register_simulations_aiida(simulation_dirs: List[Path], config_path: Path):
     """Register generated simulations with AiiDA."""
@@ -255,9 +159,92 @@ def _register_simulations_aiida(simulation_dirs: List[Path], config_path: Path):
         click.echo(f"   ✅ Registered {len(registered)} simulations")
     except ImportError:
         click.echo("   ⚠️  AiiDA integration module not found", err=True)
-    except Exception as e:
-        click.echo(f"   ⚠️  Registration failed: {e}", err=True)
+    except Exception as exc:  # pylint: disable=broad-except
+        click.echo(f"   ⚠️  Registration failed: {exc}", err=True)
         logger.exception("AiiDA registration failed")
+
+
+def _parse_walltime(value: Optional[str]) -> Optional[int]:
+    if not value:
+        return None
+    if value.isdigit():
+        return int(value)
+    parts = value.split(':')
+    if len(parts) == 3:
+        hours, minutes, seconds = [int(p) for p in parts]
+        return hours * 3600 + minutes * 60 + seconds
+    raise ValueError("Walltime must be seconds or HH:MM:SS")
+
+
+def _raise_abort(message: str, exc: Exception) -> NoReturn:
+    click.echo(message, err=True)
+    raise click.Abort() from exc
+
+
+def _build_aiida_submit_options(
+    machines: Optional[int],
+    mpiprocs: Optional[int],
+    walltime: Optional[str],
+    queue: Optional[str],
+    project: Optional[str],
+    mem: Optional[str],
+    scheduler: str,
+    prepend_text: tuple,
+) -> Dict[str, Any]:
+    options: Dict[str, Any] = {}
+    resource_options: Dict[str, Any] = {}
+    settings = cast(Any, load_settings())
+    hpc_defaults = settings.hpc
+
+    if machines is None:
+        machines = getattr(hpc_defaults, 'num_nodes', None)
+    if mpiprocs is None:
+        mpiprocs = getattr(hpc_defaults, 'num_cpus', None)
+    if machines:
+        resource_options['num_machines'] = machines
+    if mpiprocs:
+        resource_options['num_mpiprocs_per_machine'] = mpiprocs
+    if resource_options:
+        options['resources'] = resource_options
+
+    if walltime is None:
+        default_hours = getattr(hpc_defaults, 'walltime_hours', None)
+        if default_hours:
+            walltime = f"{default_hours}:00:00"
+    walltime_seconds = _parse_walltime(walltime)
+    if walltime_seconds is not None:
+        options['max_wallclock_seconds'] = walltime_seconds
+
+    if queue is None:
+        queue = getattr(hpc_defaults, 'queue', None)
+    if queue:
+        options['queue_name'] = queue
+    if project is None:
+        project = getattr(hpc_defaults, 'account', None)
+    if project:
+        options['account'] = project
+
+    scheduler_cmds = []
+    if mem is None:
+        default_mem = getattr(hpc_defaults, 'memory_gb', None)
+        if default_mem:
+            mem = f"{default_mem}gb"
+    if mem:
+        if scheduler == 'slurm':
+            scheduler_cmds.append(f"#SBATCH --mem={mem}")
+        else:
+            scheduler_cmds.append(f"#PBS -l mem={mem}")
+    if scheduler_cmds:
+        options['custom_scheduler_commands'] = "\n".join(scheduler_cmds)
+
+    if not prepend_text:
+        modules_list = cast(List[str], getattr(hpc_defaults, 'modules', []))
+        if modules_list:
+            prepend_text = tuple(f"module load {m}" for m in modules_list)
+    if prepend_text:
+        options['prepend_text'] = "\n".join(prepend_text)
+
+    return options
 
 # =============================================================================
 # SETTINGS COMMANDS
@@ -266,7 +253,7 @@ def _register_simulations_aiida(simulation_dirs: List[Path], config_path: Path):
 @cli.group('settings')
 def settings_group():
     """Manage simulation settings."""
-    pass
+
 
 @settings_group.command('show')
 def settings_show():
@@ -277,7 +264,7 @@ def settings_show():
 @settings_group.command('init')
 def settings_init():
     """Create a local settings.yaml file for customization."""
-    with resources.as_file(resources.files('src.data.settings') / 'settings.yaml') as p:
+    with pkg_resources.as_file(pkg_resources.files('src.data.settings') / 'settings.yaml') as p:
         shutil.copy(p, "settings.yaml")
     click.echo("✅ Created 'settings.yaml' in current directory")
 
@@ -298,7 +285,7 @@ def settings_reset():
 @cli.group('hpc')
 def hpc_group():
     """Generate HPC submission scripts."""
-    pass
+
 
 @hpc_group.command('generate')
 @click.argument('simulation_dir', type=click.Path(exists=True))
@@ -315,41 +302,67 @@ def hpc_generate(simulation_dir: str, scheduler: str, output_dir: Optional[str])
         FrictionSim2D hpc generate ./afm_output --scheduler pbs
     """
     from src.hpc import HPCScriptGenerator, HPCConfig
-    
+
     sim_dir = Path(simulation_dir)
     out_dir = Path(output_dir) if output_dir else sim_dir / 'hpc'
     out_dir.mkdir(parents=True, exist_ok=True)
-    
+
     click.echo(f"🖥️  Generating {scheduler.upper()} scripts for: {sim_dir}")
-    
+
+    settings = load_settings()
+    _ensure_hpc_settings(settings.hpc)
+    hpc_config = HPCConfig.from_settings(settings.hpc)
+    hpc_config.scheduler_type = scheduler  # type: ignore[assignment]
+
     simulation_paths = []
+    script_names = hpc_config.lammps_scripts or ['system.in', 'slide.in']
+
+    def script_exists(lammps_dir: Path, script_name: str) -> bool:
+        if '*' in script_name or '?' in script_name:
+            return any(lammps_dir.glob(script_name))
+        if script_name == 'slide.in':
+            return (
+                (lammps_dir / 'slide.in').exists()
+                or any(lammps_dir.glob('slide_*.in'))
+            )
+        return (lammps_dir / script_name).exists()
+
     for lammps_dir in sim_dir.rglob('lammps'):
-        if lammps_dir.is_dir() and (lammps_dir / 'system.in').exists():
-            rel_path = lammps_dir.parent.relative_to(sim_dir)
-            simulation_paths.append(str(rel_path))
-    
+        if not lammps_dir.is_dir():
+            continue
+        if not any(script_exists(lammps_dir, script) for script in script_names):
+            continue
+        rel_path = lammps_dir.parent.relative_to(sim_dir)
+        simulation_paths.append(str(rel_path))
+
     if not simulation_paths:
         click.echo("❌ No simulation directories found", err=True)
         raise click.Abort()
-    
+
     click.echo(f"📋 Found {len(simulation_paths)} simulations")
-    
-    settings = load_settings()
-    hpc_config = HPCConfig.from_settings(settings.hpc)
-    hpc_config.scheduler_type = scheduler
-    
-    generator = HPCScriptGenerator(hpc_config)
-    scripts = generator.generate_scripts(
-        simulation_paths=simulation_paths,
-        output_dir=out_dir,
-        scheduler=scheduler
+
+    manifest_entries, resolved_scripts = _build_hpc_manifest_entries(
+        sim_dir,
+        simulation_paths,
+        hpc_config.lammps_scripts,
     )
-    
+    hpc_config.lammps_scripts = resolved_scripts
+
+    generator = HPCScriptGenerator(hpc_config)
+    base_dir = '$PBS_O_WORKDIR' if scheduler == 'pbs' else '$SLURM_SUBMIT_DIR'
+    scripts = generator.generate_scripts(
+        simulation_paths=manifest_entries,
+        output_dir=out_dir,
+        scheduler=scheduler,  # type: ignore[arg-type]
+        log_dir=hpc_config.log_dir,
+        base_dir=base_dir
+    )
+
     click.echo(f"✅ Generated {len(scripts)} script(s) in {out_dir}")
-    click.echo(f"\n📝 Next steps:")
+    click.echo("\n📝 Next steps:")
     click.echo(f"   1. Review scripts in {out_dir}")
-    click.echo(f"   2. Transfer to HPC cluster")
-    click.echo(f"   3. Run ./submit_all.sh")
+    click.echo("   2. Transfer to HPC cluster")
+    click.echo("   3. Follow submit_all.txt")
 
 # =============================================================================
 # AIIDA COMMANDS (Optional)
@@ -376,12 +389,12 @@ def aiida_status():
     click.echo("✅ AiiDA is installed")
     
     try:
-        from aiida import load_profile
+        from aiida.manage.configuration import load_profile
         profile = load_profile()
         click.echo(f"✅ Active profile: {profile.name}")
         click.echo(f"   Storage: {profile.storage_backend}")
-    except Exception as e:
-        click.echo(f"⚠️  No active profile: {e}")
+    except Exception as exc:  # pylint: disable=broad-except
+        click.echo(f"⚠️  No active profile: {exc}")
         click.echo("\n📝 Setup AiiDA with: verdi presto --use-postgres")
 
 @aiida_group.command('import')
@@ -403,16 +416,15 @@ def aiida_import(results_dir: str, process: bool):
         if process:
             click.echo("🔄 Running postprocessing...")
             from src.postprocessing.read_data import DataReader
-            reader = DataReader(results_dir=str(results_path))
+            _ = DataReader(results_dir=str(results_path))
             click.echo("   ✅ Postprocessing complete")
         
         imported = import_results_to_aiida(results_path)
         click.echo(f"✅ Imported {len(imported)} simulations to AiiDA")
         
-    except Exception as e:
-        click.echo(f"❌ Import failed: {e}", err=True)
+    except Exception as exc:  # pylint: disable=broad-except
         logger.exception("Import failed")
-        raise click.Abort()
+        _raise_abort(f"❌ Import failed: {exc}", exc)
 
 @aiida_group.command('query')
 @click.option('--material', '-m', help='Filter by material')
@@ -428,7 +440,7 @@ def aiida_query(material: Optional[str], layers: Optional[int], force: Optional[
     Example:
         FrictionSim2D aiida query --material h-MoS2 --layers 2 --format csv
     """
-    from src.aiida.db import Friction2DDB
+    from src.aiida.query import Friction2DDB
     
     db = Friction2DDB()
     
@@ -464,9 +476,232 @@ def aiida_query(material: Optional[str], layers: Optional[int], force: Optional[
                 import json
                 click.echo(json.dumps(results.query_params, indent=2))
                 
-    except Exception as e:
-        click.echo(f"❌ Query failed: {e}", err=True)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.exception("AiiDA query failed")
+        _raise_abort(f"❌ Query failed: {exc}", exc)
+
+
+@aiida_group.command('setup')
+@click.option('--profile', '-p', default=None,
+              help='AiiDA profile name (default: auto-created)')
+@click.option('--lammps-path', type=click.Path(),
+              help='Explicit path to LAMMPS executable')
+@click.option('--hpc-config', type=click.Path(exists=True),
+              help='Path to hpc.yaml for PBS/SLURM computer setup')
+def aiida_setup(profile: Optional[str], lammps_path: Optional[str], hpc_config: Optional[str]):
+    """Set up AiiDA profile, computer, and LAMMPS code.
+
+    Performs first-time AiiDA configuration on the current machine:
+    creates a profile (via verdi presto), registers localhost as a
+    computer, and configures the LAMMPS code.
+
+    Example::
+
+        FrictionSim2D aiida setup
+        FrictionSim2D aiida setup --lammps-path /usr/local/bin/lmp_mpi
+    """
+    from src.aiida.setup import full_setup
+
+    click.echo("🔧 Running AiiDA first-time setup ...")
+    try:
+        full_setup(
+            profile_name=profile or 'friction2d',
+            lammps_executable=lammps_path,
+            hpc_config=Path(hpc_config) if hpc_config else None,
+        )
+        click.echo("✅ AiiDA setup complete")
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.exception("AiiDA setup failed")
+        _raise_abort(f"❌ Setup failed: {exc}", exc)
+
+
+@aiida_group.command('export')
+@click.option('--output', '-o', type=click.Path(), default='friction2d.aiida',
+              help='Output archive path')
+@click.option('--material', '-m', default=None,
+              help='Export only simulations for a given material')
+def aiida_export(output: str, material: Optional[str]):
+    """Export AiiDA database to a portable archive file.
+
+    The archive can be transferred to another machine and imported
+    with ``FrictionSim2D aiida import-archive``.
+
+    Example::
+
+        FrictionSim2D aiida export -o results.aiida
+        FrictionSim2D aiida export -m h-MoS2
+    """
+    from src.aiida.integration import export_archive
+
+    click.echo(f"📦 Exporting archive to {output} ...")
+    try:
+        export_archive(Path(output), materials=[material] if material else None)
+        click.echo(f"✅ Archive saved: {output}")
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.exception("AiiDA export failed")
+        _raise_abort(f"❌ Export failed: {exc}", exc)
+
+
+@aiida_group.command('import-archive')
+@click.argument('archive_path', type=click.Path(exists=True))
+def aiida_import_archive(archive_path: str):
+    """Import an AiiDA archive into the current profile.
+
+    Use this to set up a mirror database on a local workstation from
+    results exported on an HPC cluster.
+
+    Example::
+
+        FrictionSim2D aiida import-archive results.aiida
+    """
+    from src.aiida.integration import import_archive
+
+    click.echo(f"📥 Importing archive: {archive_path} ...")
+    try:
+        import_archive(Path(archive_path))
+        click.echo("✅ Archive imported successfully")
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.exception("AiiDA import-archive failed")
+        _raise_abort(f"❌ Import failed: {exc}", exc)
+
+
+@aiida_group.command('package')
+@click.argument('simulation_dir', type=click.Path(exists=True))
+@click.option('--output', '-o', type=click.Path(), default=None,
+              help='Output archive path (.tar.gz)')
+def aiida_package(simulation_dir: str, output: Optional[str]):
+    """Create a tar.gz archive of simulation inputs for transfer."""
+    sim_path = Path(simulation_dir)
+    out_path = Path(output) if output else sim_path.with_suffix('.tar.gz')
+
+    def _tar_filter(info: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
+        if info.name.endswith('.lammpstrj'):
+            return None
+        return info
+
+    click.echo(f"📦 Packing {sim_path} → {out_path}")
+    with tarfile.open(out_path, 'w:gz') as tar:
+        tar.add(sim_path, arcname=sim_path.name, filter=_tar_filter)
+    click.echo(f"✅ Archive created: {out_path}")
+
+
+@aiida_group.command('submit')
+@click.argument('simulation_dir', type=click.Path(exists=True))
+@click.option('--code', '-c', default='lammps@localhost',
+              help='AiiDA code label (default: lammps@localhost)')
+@click.option('--scripts', default=None,
+              help='Comma-separated list of LAMMPS scripts to run in order')
+@click.option('--array', 'use_array', is_flag=True,
+              help='Submit a single array job for all simulations')
+@click.option('--scheduler', type=click.Choice(['pbs', 'slurm']), default='pbs',
+              help='Scheduler type for array directives')
+@click.option('--machines', type=int, default=None,
+              help='Number of machines per job')
+@click.option('--mpiprocs', type=int, default=None,
+              help='MPI processes per machine')
+@click.option('--walltime', type=str, default=None,
+              help='Walltime (seconds or HH:MM:SS)')
+@click.option('--queue', type=str, default=None,
+              help='Scheduler queue name')
+@click.option('--project', type=str, default=None,
+              help='Scheduler project/account')
+@click.option('--mem', type=str, default=None,
+              help='Memory request (e.g., 62gb)')
+@click.option('--prepend-text', 'prepend_text', multiple=True,
+              help='Lines to prepend to the job script (e.g., module load)')
+@click.option('--dry-run', is_flag=True,
+              help='Validate inputs without submitting')
+def aiida_submit(
+    simulation_dir: str,
+    code: str,
+    scripts: Optional[str],
+    use_array: bool,
+    scheduler: str,
+    machines: Optional[int],
+    mpiprocs: Optional[int],
+    walltime: Optional[str],
+    queue: Optional[str],
+    project: Optional[str],
+    mem: Optional[str],
+    prepend_text: tuple,
+    dry_run: bool,
+):
+    """Submit simulations to HPC via the AiiDA CalcJob.
+
+    Scans SIMULATION_DIR for LAMMPS run directories and submits each
+    one as an AiiDA CalcJob for provenance-tracked execution.
+
+    Example::
+
+        FrictionSim2D aiida submit ./afm_output -c lammps@hpc
+    """
+    from src.aiida.calcjob import submit_batch, submit_array
+    from aiida.orm import load_code
+
+    sim_path = Path(simulation_dir)
+    click.echo(f"🚀 Submitting simulations from {sim_path} ...")
+
+    try:
+        code_node = load_code(code)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.exception("AiiDA code lookup failed")
+        _raise_abort(f"❌ Code '{code}' not found. Run 'aiida setup' first.", exc)
+
+    lammps_dirs = sorted(
+        d.parent for d in sim_path.rglob('system.lmp') if d.parent.is_dir()
+    )
+    if not lammps_dirs:
+        lammps_dirs = sorted(
+            d.parent for d in sim_path.rglob('system.in') if d.parent.is_dir()
+        )
+
+    if not lammps_dirs:
+        click.echo("❌ No LAMMPS simulation directories found", err=True)
         raise click.Abort()
+
+    click.echo(f"📋 Found {len(lammps_dirs)} simulation(s)")
+
+    if dry_run:
+        for d in lammps_dirs:
+            click.echo(f"   [dry-run] {d}")
+        return
+
+    try:
+        params = None
+        if scripts:
+            script_list = [s.strip() for s in scripts.split(',') if s.strip()]
+            if script_list:
+                params = {'lammps_scripts': script_list}
+
+        options = _build_aiida_submit_options(
+            machines=machines,
+            mpiprocs=mpiprocs,
+            walltime=walltime,
+            queue=queue,
+            project=project,
+            mem=mem,
+            scheduler=scheduler,
+            prepend_text=prepend_text,
+        )
+
+        if use_array:
+            node = submit_array(
+                sim_path,
+                lammps_dirs,
+                code_node,
+                options=options,
+                parameters=params,
+                scheduler=scheduler,
+            )
+            click.echo(f"✅ Submitted array CalcJob PK={node.pk}")
+        else:
+            nodes = submit_batch(lammps_dirs, code_node, options=options, parameters=params)
+            click.echo(f"✅ Submitted {len(nodes)} CalcJob(s)")
+            for node in nodes:
+                click.echo(f"   PK={node.pk}  {node.label or ''}")
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.exception("AiiDA submit failed")
+        _raise_abort(f"❌ Submission failed: {exc}", exc)
 
 # =============================================================================
 # MAIN ENTRY POINT
@@ -476,10 +711,9 @@ def main():
     """Main CLI entry point."""
     try:
         cli()
-    except Exception as e:
+    except Exception:  # pylint: disable=broad-except
         logger.exception("Command failed")
         sys.exit(1)
 
 if __name__ == "__main__":
     main()
-

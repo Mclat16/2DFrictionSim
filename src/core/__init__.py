@@ -28,6 +28,11 @@ from src.core.utils import (
     get_material_path,
     get_potential_path,
     read_config,
+    get_model_dimensions,
+    get_num_atom_types,
+    atomic2molecular,
+    renumber_atom_types,
+    check_potential_cif_compatibility,
 )
 
 __all__ = [
@@ -49,4 +54,9 @@ __all__ = [
     "get_material_path",
     "get_potential_path",
     "read_config",
+    "get_model_dimensions",
+    "get_num_atom_types",
+    "atomic2molecular",
+    "renumber_atom_types",
+    "check_potential_cif_compatibility",
 ]

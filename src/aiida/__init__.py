@@ -1,79 +1,78 @@
-"""AiiDA plugin for FrictionSim2D.
+"""AiiDA integration for FrictionSim2D.
 
-This module provides optional integration with AiiDA for managing friction simulations.
-All functionality gracefully degrades if AiiDA is not installed.
-
-Provides:
-- Custom data types (nodes) for storing simulation metadata and results
-- Database query interface (Friction2DDB) for accessing stored data  
-- Integration functions for registering simulations and importing results
-
-Usage:
-------
-Registration (done via CLI or programmatically):
-    from src.aiida.integration import register_simulation_batch
-    register_simulation_batch(simulation_dirs, config_path)
-
-Import results:
-    from src.aiida.integration import import_results_to_aiida
-    import_results_to_aiida(results_dir)
-
-Query database:
-    from src.aiida.db import Friction2DDB
-    db = Friction2DDB()
-    results = db.query_by_material('h-MoS2')
-
-CLI Commands:
-    FrictionSim2D run.afm config.ini --aiida    # Auto-register after building
-    FrictionSim2D aiida import ./results        # Import results
-    FrictionSim2D aiida query -m h-MoS2         # Query database
+This package intentionally keeps a thin root module and lazy-loads
+advanced symbols to reduce import-time coupling across AiiDA plugins.
 """
 
+from importlib import import_module
+from typing import Any, Dict, Tuple
+
 try:
-    import aiida
+    import aiida  # noqa: F401
     AIIDA_AVAILABLE = True
 except ImportError:
     AIIDA_AVAILABLE = False
 
-__all__ = ['AIIDA_AVAILABLE']
-
 if AIIDA_AVAILABLE:
-    try:
-        # Data nodes
-        from .data import (
-            FrictionSimulationData,
-            FrictionConfigData,
-            FrictionResultsData,
-            FrictionProvenanceData,
+    from aiida.manage.configuration import load_profile as LOAD_PROFILE
+else:
+    LOAD_PROFILE = None
+
+_LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
+    'FrictionSimulationData': ('src.aiida.data', 'FrictionSimulationData'),
+    'FrictionResultsData': ('src.aiida.data', 'FrictionResultsData'),
+    'FrictionProvenanceData': ('src.aiida.data', 'FrictionProvenanceData'),
+    'Friction2DDB': ('src.aiida.query', 'Friction2DDB'),
+    'register_simulation_batch': ('src.aiida.integration', 'register_simulation_batch'),
+    'register_single_simulation': ('src.aiida.integration', 'register_single_simulation'),
+    'import_results_to_aiida': ('src.aiida.integration', 'import_results_to_aiida'),
+    'export_archive': ('src.aiida.integration', 'export_archive'),
+    'import_archive': ('src.aiida.integration', 'import_archive'),
+    'LammpsFrictionCalcJob': ('src.aiida.calcjob', 'LammpsFrictionCalcJob'),
+    'FrictionWorkChain': ('src.aiida.workchain', 'FrictionWorkChain'),
+}
+
+__all__ = ['AIIDA_AVAILABLE', 'load_aiida_profile']
+
+
+def load_aiida_profile(profile_name=None):
+    """Load an AiiDA profile, required before using any AiiDA functionality.
+
+    Should be called once at application startup (e.g. from the CLI) before
+    any AiiDA nodes are created or queried.
+
+    Args:
+        profile_name: Name of the AiiDA profile to load. If ``None``,
+            the default profile is loaded.
+
+    Returns:
+        The loaded ``aiida.manage.configuration.Profile`` instance.
+
+    Raises:
+        RuntimeError: If AiiDA is not installed.
+        aiida.common.exceptions.ProfileConfigurationError: If profile not found.
+    """
+    if not AIIDA_AVAILABLE:
+        raise RuntimeError(
+            "AiiDA is not installed. Install with: pip install 'FrictionSim2D[aiida]'"
         )
-        
-        # Database query interface
-        from .db import Friction2DDB
-        
-        # Integration functions (main entry points)
-        from .integration import (
-            register_simulation_batch,
-            register_single_simulation,
-            import_results_to_aiida,
+    if LOAD_PROFILE is None:
+        raise RuntimeError("AiiDA profile loader is unavailable")
+    return LOAD_PROFILE(profile_name)
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy-load optional AiiDA symbols exported at package root."""
+    if name not in _LAZY_EXPORTS:
+        raise AttributeError(f"module 'src.aiida' has no attribute '{name}'")
+    if not AIIDA_AVAILABLE:
+        raise AttributeError(
+            f"AiiDA is unavailable; cannot access '{name}'. "
+            "Install with: pip install 'FrictionSim2D[aiida]'"
         )
-        
-        __all__.extend([
-            # Data nodes
-            'FrictionSimulationData',
-            'FrictionConfigData',
-            'FrictionResultsData',
-            'FrictionProvenanceData',
-            # Database
-            'Friction2DDB',
-            # Integration
-            'register_simulation_batch',
-            'register_single_simulation',
-            'import_results_to_aiida',
-        ])
-    except ImportError as e:
-        import warnings
-        warnings.warn(
-            f"AiiDA is installed but some modules failed to import: {e}",
-            ImportWarning
-        )
-        AIIDA_AVAILABLE = False
+
+    module_name, symbol_name = _LAZY_EXPORTS[name]
+    module = import_module(module_name)
+    value = getattr(module, symbol_name)
+    globals()[name] = value
+    return value

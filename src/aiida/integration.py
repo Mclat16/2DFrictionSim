@@ -1,260 +1,413 @@
-"""Standalone AiiDA integration module.
+"""AiiDA integration module for FrictionSim2D.
 
-This module provides functions to register simulations with AiiDA without
-modifying core builder or simulation_base files. It scans generated simulation
-directories and creates provenance/simulation nodes as needed.
+Provides functions to register simulations with AiiDA after file generation
+and to import completed results. Works in tandem with the HPC manifest
+system (:mod:`src.hpc.manifest`) for end-to-end job tracking.
+
+Typical workflow on HPC
+-----------------------
+1. Generate simulation files::
+
+        FrictionSim2D run afm config.ini --aiida
+
+2. AiiDA registers each simulation (this module).
+3. Jobs are submitted via AiiDA CalcJob or manually.
+4. After completion, import results::
+
+        FrictionSim2D aiida import ./results
 """
 
 import json
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from src.aiida import AIIDA_AVAILABLE
 
-if not AIIDA_AVAILABLE:
-    raise ImportError("AiiDA is not installed. Install with: "
-                     "conda install -c conda-forge aiida-core")
-
-from src.aiida.data import (
-    FrictionProvenanceData,
-    FrictionSimulationData,
-    FrictionResultsData
-)
+if TYPE_CHECKING:
+    from src.aiida.data import (
+        FrictionProvenanceData,
+        FrictionSimulationData,
+        FrictionResultsData,
+    )
 
 logger = logging.getLogger(__name__)
 
+_REGISTRATION_EXCEPTIONS = (
+    OSError,
+    ValueError,
+    KeyError,
+    TypeError,
+    RuntimeError,
+    json.JSONDecodeError,
+)
 
-def register_simulation_batch(simulation_dirs: List[Path], config_path: Path) -> List[str]:
+
+def _require_aiida():
+    """Raise if AiiDA is not available."""
+    if not AIIDA_AVAILABLE:
+        raise ImportError(
+            "AiiDA is not installed. Install with: pip install 'FrictionSim2D[aiida]'"
+        )
+
+
+# =============================================================================
+# Registration (after file generation)
+# =============================================================================
+
+def register_simulation_batch(
+    simulation_dirs: List[Path],
+    config_path: Path,
+    manifest_path: Optional[Path] = None,
+) -> List[str]:
     """Register a batch of simulations with AiiDA.
-    
-    Scans each simulation directory for provenance folder and creates
-    appropriate AiiDA nodes.
-    
+
+    Scans each simulation directory for a ``provenance/`` folder and creates
+    the corresponding AiiDA nodes. Optionally updates the HPC
+    :class:`~src.hpc.manifest.JobManifest` with node UUIDs.
+
     Args:
-        simulation_dirs: List of simulation output directories
-        config_path: Path to original config file
-        
+        simulation_dirs: Simulation output directories.
+        config_path: Path to the original config file.
+        manifest_path: Optional path to the HPC manifest JSON. If provided,
+            job entries are updated with AiiDA node UUIDs.
+
     Returns:
-        List of created simulation node UUIDs
+        List of created simulation node UUIDs.
     """
-    created_uuids = []
-    
+    _require_aiida()
+
+    manifest = _load_manifest(manifest_path) if manifest_path else None
+    created_uuids: List[str] = []
+
     for sim_dir in simulation_dirs:
         try:
             uuid = register_single_simulation(sim_dir, config_path)
             if uuid:
                 created_uuids.append(uuid)
-        except Exception as e:
-            logger.warning("Failed to register %s: %s", sim_dir, e)
-            continue
-    
+                if manifest:
+                    _update_manifest_entry(manifest, sim_dir, uuid)
+        except _REGISTRATION_EXCEPTIONS:
+            logger.warning("Failed to register %s", sim_dir, exc_info=True)
+
+    if manifest and manifest_path:
+        manifest.save(manifest_path)
+        logger.info("Updated manifest at %s", manifest_path)
+
     return created_uuids
 
 
-def register_single_simulation(sim_dir: Path, config_path: Path) -> Optional[str]:
+def register_single_simulation(
+    sim_dir: Path,
+    config_path: Path,
+) -> Optional[str]:
     """Register a single simulation with AiiDA.
-    
+
+    Creates a ``FrictionProvenanceData`` node from the ``provenance/`` folder
+    and a ``FrictionSimulationData`` node populated from ``config.json``.
+
     Args:
-        sim_dir: Simulation output directory
-        config_path: Path to original config file
-        
+        sim_dir: Simulation output directory.
+        config_path: Path to the original config file.
+
     Returns:
-        UUID of created simulation node, or None if failed
+        UUID of the created simulation node, or ``None`` on failure.
     """
+    _require_aiida()
+    sim_dir = Path(sim_dir)
+
     prov_dir = sim_dir / 'provenance'
-    
     if not prov_dir.exists():
-        logger.warning("No provenance folder found in %s", sim_dir)
+        logger.warning("No provenance folder in %s — skipping", sim_dir)
         return None
-    
-    prov_node = create_provenance_node(prov_dir, config_path)
-    
+
+    # --- Provenance node ---
+    prov_node = _create_provenance_node(prov_dir, config_path)
+
+    # --- Config data ---
     config_file = prov_dir / 'config.json'
     if not config_file.exists():
-        logger.warning("No config.json in provenance folder")
+        logger.warning("No config.json in %s/provenance", sim_dir)
         return None
-    
-    config_data = json.loads(config_file.read_text())
-    
+
+    config_data = json.loads(config_file.read_text(encoding='utf-8'))
+
+    # --- Simulation node ---
+    from src.aiida.data import FrictionSimulationData  # pylint: disable=import-outside-toplevel
     sim_node = FrictionSimulationData()
-    
-    sim_node.simulation_type = 'afm' if 'tip' in config_data else 'sheetonsheet'
-    sim_node.material = config_data.get('2D', {}).get('mat', 'unknown')
-    
-    if 'general' in config_data:
-        sim_node.temperature = config_data['general'].get('temp', 300.0)
-    
-    if 'sheet' in config_data and 'layers' in config_data['sheet']:
-        layers = config_data['sheet']['layers']
-        sim_node.layers = layers if isinstance(layers, int) else layers[0]
-    
-    sim_node.simulation_path = str(sim_dir.relative_to(sim_dir.parent.parent))
+    sim_type = 'afm' if 'tip' in config_data else 'sheetonsheet'
+    sim_node.set_from_config(config_data, simulation_type=sim_type)
+
+    # Relative path for portability
+    try:
+        sim_node.simulation_path = str(sim_dir.relative_to(sim_dir.parent.parent))
+    except ValueError:
+        sim_node.simulation_path = str(sim_dir)
+
     sim_node.status = 'prepared'
-    
+
     if prov_node:
-        sim_node.base.attributes.set('provenance_uuid', str(prov_node.uuid))
-    
+        sim_node.provenance_uuid = str(prov_node.uuid)
+
     sim_node.store()
-    
-    manifest_path = prov_dir / 'manifest.json'
-    if manifest_path.exists():
-        manifest_data = json.loads(manifest_path.read_text())
-        manifest_data['simulation_node_uuid'] = str(sim_node.uuid)
-        if prov_node:
-            manifest_data['provenance_node_uuid'] = str(prov_node.uuid)
-        manifest_path.write_text(json.dumps(manifest_data, indent=2))
-    
-    logger.info("Registered simulation: %s (UUID: %s)", sim_dir.name, sim_node.uuid)
-    
+
+    # Update the on-disk manifest with node UUIDs
+    _update_provenance_manifest(prov_dir, sim_node, prov_node)
+
+    logger.info("Registered: %s (UUID: %s)", sim_dir.name, sim_node.uuid)
     return str(sim_node.uuid)
 
 
-def create_provenance_node(prov_dir: Path, config_path: Path) -> Optional[FrictionProvenanceData]:
-    """Create provenance node from provenance directory.
-    
+def _create_provenance_node(
+    prov_dir: Path,
+    config_path: Path,
+) -> Optional['FrictionProvenanceData']:
+    """Create and store a provenance node from the provenance directory.
+
     Args:
-        prov_dir: Provenance directory containing CIFs, potentials, config
-        config_path: Original config file path
-        
+        prov_dir: Path to the ``provenance/`` folder.
+        config_path: Original config file path.
+
     Returns:
-        Created provenance node or None if failed
+        Stored provenance node, or ``None`` on failure.
     """
     try:
-        prov_node = FrictionProvenanceData()
-        
-        config_file = prov_dir / 'config.json'
-        if config_file.exists():
-            prov_node.base.repository.put_object_from_file(
-                str(config_file), 'config.json'
-            )
-        
-        manifest_file = prov_dir / 'manifest.json'
-        if manifest_file.exists():
-            manifest_data = json.loads(manifest_file.read_text())
-            prov_node.base.attributes.set('file_manifest', manifest_data)
-        
-        cif_dir = prov_dir / 'cif'
-        if cif_dir.exists():
-            cif_files = {}
-            for cif_file in cif_dir.glob('*.cif'):
-                prov_node.base.repository.put_object_from_file(
-                    str(cif_file), f'cif/{cif_file.name}'
-                )
-                cif_files[cif_file.name] = _compute_checksum(cif_file)
-            prov_node.base.attributes.set('cif_files', cif_files)
-        
-        pot_dir = prov_dir / 'potentials'
-        if pot_dir.exists():
-            pot_files = {}
-            for pot_file in pot_dir.iterdir():
-                if pot_file.is_file():
-                    prov_node.base.repository.put_object_from_file(
-                        str(pot_file), f'potentials/{pot_file.name}'
-                    )
-                    pot_files[pot_file.name] = _compute_checksum(pot_file)
-            prov_node.base.attributes.set('potential_files', pot_files)
-        
+        from src.aiida.data import FrictionProvenanceData  # pylint: disable=import-outside-toplevel
+        prov_node = FrictionProvenanceData.from_provenance_folder(prov_dir)
         prov_node.base.attributes.set('config_filename', config_path.name)
-        
         prov_node.store()
         logger.info("Created provenance node: %s", prov_node.uuid)
-        
         return prov_node
-        
-    except Exception as e:
-        logger.error("Failed to create provenance node: %s", e)
+    except _REGISTRATION_EXCEPTIONS:
+        logger.error("Failed to create provenance node from %s", prov_dir, exc_info=True)
         return None
 
 
+def _update_provenance_manifest(
+    prov_dir: Path,
+    sim_node: 'FrictionSimulationData',
+    prov_node: Optional['FrictionProvenanceData'],
+) -> None:
+    """Write AiiDA node UUIDs back into the on-disk manifest.json."""
+    manifest_path = prov_dir / 'manifest.json'
+    if not manifest_path.exists():
+        return
+
+    manifest_data = json.loads(manifest_path.read_text(encoding='utf-8'))
+    manifest_data['simulation_node_uuid'] = str(sim_node.uuid)
+    if prov_node:
+        manifest_data['provenance_node_uuid'] = str(prov_node.uuid)
+    manifest_path.write_text(json.dumps(manifest_data, indent=2), encoding='utf-8')
+
+
+# =============================================================================
+# Result import
+# =============================================================================
+
 def import_results_to_aiida(results_dir: Path) -> List[str]:
     """Import completed simulation results into AiiDA.
-    
-    Reads results using DataReader (which calculates COF and lateral force),
-    then stores in AiiDA with automatic summary statistics calculation.
-    
+
+    Reads results using :class:`~src.postprocessing.read_data.DataReader`
+    (which calculates COF and lateral force), then creates
+    ``FrictionResultsData`` nodes with automatic summary statistics.
+
     Args:
-        results_dir: Directory containing simulation results
-        
+        results_dir: Directory containing simulation results.
+
     Returns:
-        List of created results node UUIDs
+        List of created result node UUIDs.
     """
-    from src.postprocessing.read_data import DataReader
-    
+    _require_aiida()
+    from src.postprocessing.read_data import DataReader  # pylint: disable=import-outside-toplevel
+
     reader = DataReader(results_dir=str(results_dir))
-    
-    created_uuids = []
-    
-    # The data structure from DataReader is nested:
-    # material -> size -> substrate -> tip -> radius -> layer -> speed -> force/pressure -> angle -> DataFrame
+    created_uuids: List[str] = []
+
     for material, size_data in reader.full_data_nested.items():
         for size_key, substrate_data in size_data.items():
-            for _substrate, tip_data in substrate_data.items():
-                for _tip_mat, radius_data in tip_data.items():
-                    for _radius, layer_data in radius_data.items():
-                        for layer_key, speed_data in layer_data.items():
-                            layers = int(layer_key.replace('l', ''))
-                            
-                            for speed_key, force_data in speed_data.items():
-                                speed = int(speed_key.replace('s', ''))
-                                
-                                for load_key, angle_data in force_data.items():
-                                    # Parse force or pressure
-                                    is_pressure = load_key.startswith('p')
-                                    load_val = float(load_key[1:])
-                                    
-                                    for angle_key, df in angle_data.items():
-                                        angle = int(angle_key.replace('a', ''))
-                                        
-                                        try:
-                                            results_node = FrictionResultsData()
-                                            
-                                            # Set metadata
-                                            results_node.material = material.replace('_', '-')
-                                            results_node.layers = layers
-                                            results_node.speed = speed
-                                            results_node.angle = angle
-                                            results_node.size = size_key
-                                            
-                                            if is_pressure:
-                                                results_node.base.attributes.set('pressure', load_val)
-                                            else:
-                                                results_node.force = load_val
-                                            
-                                            # Convert DataFrame to time-series dict
-                                            # DataReader already calculated COF and lateral_force
-                                            time_series = {col: df[col].tolist() for col in df.columns}
-                                            
-                                            # Add time array from reader
-                                            if reader.time_series:
-                                                time_series['time'] = reader.time_series
-                                            
-                                            # Store time series (this auto-calculates summary stats)
-                                            results_node.time_series = time_series
-                                            results_node.is_complete = True
-                                            
-                                            results_node.store()
-                                            created_uuids.append(str(results_node.uuid))
-                                            
-                                            logger.info("Imported: %s L%d %s%.1f A%d - COF: %.4f",
-                                                       material, layers, 
-                                                       'P' if is_pressure else 'F',
-                                                       load_val, angle,
-                                                       results_node.mean_cof)
-                                            
-                                        except Exception as e:
-                                            logger.warning("Failed to import %s/%s/%s: %s",
-                                                         material, layer_key, load_key, e)
-                                            continue
-    
+            _import_substrate_tree(
+                reader, material, size_key, substrate_data, created_uuids
+            )
+
+    logger.info("Imported %d result nodes from %s", len(created_uuids), results_dir)
     return created_uuids
 
 
-def _compute_checksum(file_path: Path) -> str:
-    """Compute SHA-256 checksum of a file."""
-    import hashlib
-    sha256 = hashlib.sha256()
-    with open(file_path, 'rb') as f:
-        for chunk in iter(lambda: f.read(4096), b''):
-            sha256.update(chunk)
-    return sha256.hexdigest()
+def _import_substrate_tree(
+    reader, material: str, size_key: str,
+    substrate_data: Dict, created_uuids: List[str],
+) -> None:
+    """Walk the nested DataReader tree and create result nodes.
+
+    Separated from :func:`import_results_to_aiida` to reduce nesting depth.
+    """
+    for _substrate, tip_data in substrate_data.items():
+        for _tip_mat, radius_data in tip_data.items():
+            for _radius, layer_data in radius_data.items():
+                for layer_key, speed_data in layer_data.items():
+                    layers = int(layer_key.replace('l', ''))
+                    for speed_key, force_data in speed_data.items():
+                        speed = int(speed_key.replace('s', ''))
+                        _import_force_angle_data(
+                            reader, material, size_key, layers, speed,
+                            force_data, created_uuids,
+                        )
+
+
+def _import_force_angle_data(
+    reader, material: str, size_key: str, layers: int, speed: int,
+    force_data: Dict, created_uuids: List[str],
+) -> None:
+    """Create result nodes for each force/angle combination."""
+    for load_key, angle_data in force_data.items():
+        is_pressure = load_key.startswith('p')
+        load_val = float(load_key[1:])
+
+        for angle_key, df in angle_data.items():
+            angle = int(angle_key.replace('a', ''))
+            try:
+                node = _create_result_node(
+                    reader, material, size_key, layers, speed,
+                    load_val, is_pressure, angle, df,
+                )
+                node.store()
+                created_uuids.append(str(node.uuid))
+                logger.info(
+                    "Imported: %s L%d %s%.1f A%d — COF: %.4f",
+                    material, layers,
+                    'P' if is_pressure else 'F', load_val, angle,
+                    node.mean_cof,
+                )
+            except _REGISTRATION_EXCEPTIONS:
+                logger.warning(
+                    "Failed to import %s/l%d/%s", material, layers, load_key,
+                    exc_info=True,
+                )
+
+
+def _create_result_node(
+    reader, material: str, size_key: str, layers: int, speed: int,
+    load_val: float, is_pressure: bool, angle: int, df,
+) -> 'FrictionResultsData':
+    """Construct a single FrictionResultsData node from a DataFrame."""
+    from src.aiida.data import FrictionResultsData  # pylint: disable=import-outside-toplevel
+    node = FrictionResultsData()
+
+    node.material = material.replace('_', '-')
+    node.layers = layers
+    node.speed = speed
+    node.angle = angle
+    node.size = size_key
+
+    if is_pressure:
+        node.base.attributes.set('pressure', load_val)
+    else:
+        node.force = load_val
+
+    time_series = {col: df[col].tolist() for col in df.columns}
+    if reader.time_series:
+        time_series['time'] = reader.time_series
+
+    node.time_series = time_series  # auto-calculates summary stats
+    node.is_complete = True
+
+    return node
+
+
+# =============================================================================
+# Manifest helpers
+# =============================================================================
+
+def _load_manifest(manifest_path: Path):
+    """Load HPC ``JobManifest`` from disk.
+
+    Returns:
+        A :class:`~src.hpc.manifest.JobManifest` instance.
+    """
+    from src.hpc.manifest import JobManifest  # pylint: disable=import-outside-toplevel
+    return JobManifest.load(manifest_path)
+
+
+def _update_manifest_entry(manifest, sim_dir: Path, uuid: str) -> None:
+    """Update the manifest job entry for *sim_dir* with the AiiDA UUID."""
+    sim_path_str = str(sim_dir)
+    sim_name = sim_dir.name
+    for job in manifest.jobs:
+        if (
+            sim_name in job.simulation_path
+            or job.simulation_path in sim_path_str
+        ):
+            job.simulation_node_uuid = uuid
+
+
+# =============================================================================
+# Archive export / import helpers
+# =============================================================================
+
+def export_archive(output_path: Path, materials: Optional[List[str]] = None) -> Path:
+    """Export FrictionSim2D AiiDA nodes to a portable archive.
+
+    Wraps ``verdi archive create`` to export all FrictionSim2D nodes
+    (or a filtered subset) into a single ``.aiida`` archive file suitable
+    for transferring between HPC and local AiiDA instances.
+
+    Args:
+        output_path: Destination path for the archive file.
+        materials: Optional list of materials to filter by. If ``None``,
+            all FrictionSim2D nodes are exported.
+
+    Returns:
+        Path to the created archive file.
+    """
+    _require_aiida()
+    from aiida.orm import QueryBuilder  # pylint: disable=import-outside-toplevel
+    from aiida.tools.archive import create_archive  # pylint: disable=import-outside-toplevel
+
+    output_path = Path(output_path)
+
+    from src.aiida.data import (  # pylint: disable=import-outside-toplevel
+        FrictionSimulationData,
+        FrictionResultsData,
+        FrictionProvenanceData,
+    )
+
+    # Collect all FrictionSim2D node PKs
+    node_pks = set()
+    for node_cls in (FrictionSimulationData, FrictionResultsData, FrictionProvenanceData):
+        qb = QueryBuilder()
+        qb.append(node_cls, project=['id'])
+        if materials and node_cls == FrictionSimulationData:
+            qb.add_filter(node_cls, {'attributes.material': {'in': materials}})
+        for (pk,) in qb.all():
+            node_pks.add(pk)
+
+    if not node_pks:
+        logger.warning("No FrictionSim2D nodes found to export")
+        return output_path
+
+    create_archive(list(node_pks), filename=output_path)
+    logger.info("Exported %d nodes to %s", len(node_pks), output_path)
+    return output_path
+
+
+def import_archive(archive_path: Path) -> int:
+    """Import an AiiDA archive into the current profile.
+
+    Wraps ``verdi archive import`` for transferring data from HPC
+    to a local mirror database.
+
+    Args:
+        archive_path: Path to the ``.aiida`` archive file.
+
+    Returns:
+        Number of new nodes imported.
+    """
+    _require_aiida()
+    from aiida.tools.archive import import_archive as aiida_import  # pylint: disable=import-outside-toplevel
+
+    archive_path = Path(archive_path)
+    result = aiida_import(archive_path)
+
+    n_imported = getattr(result, 'new_nodes', 0) if result else 0
+    logger.info("Imported %d nodes from %s", n_imported, archive_path)
+    return n_imported

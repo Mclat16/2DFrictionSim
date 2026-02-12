@@ -77,9 +77,12 @@ class PotentialSettings(BaseModel):
 class HPCSettings(BaseModel):
     """HPC cluster and job submission settings."""
     scheduler_type: Literal['pbs', 'slurm'] = 'pbs'
-    queue: str = 'normal'
+    queue: Optional[str] = None
     partition: Optional[str] = None
     account: str = ''
+    hpc_home: Optional[str] = None
+    log_dir: Optional[str] = "/rds/general/user/mv923/home/logs_system_1"
+    scratch_dir: Optional[str] = "$TMPDIR"
     num_nodes: int = 1
     num_cpus: int = 32
     memory_gb: int = 62
@@ -91,6 +94,10 @@ class HPCSettings(BaseModel):
     ])
     mpi_command: str = "mpirun"
     use_tmpdir: bool = True
+    lammps_scripts: List[str] = Field(default_factory=lambda: [
+        'system.in',
+        'slide.in'
+    ])
 
 class AiidaSettings(BaseModel):
     """AiiDA-specific workflow settings."""
@@ -188,6 +195,13 @@ class GeneralConfig(BaseModel):
     pressure: Optional[Union[float, List[float]]] = None
     scan_angle: Optional[Union[float, List[float]]] = 0.0
     scan_speed: Optional[Union[float, List[float]]] = None
+    outer_loop: Optional[Literal['pressure', 'scan_speed']] = Field(
+        None,
+        description=(
+            "Parameter expanded as separate LAMMPS input files (slide_*.in). "
+            "If omitted, legacy single-script behavior is used."
+        )
+    )
     bond_spring: Optional[float] = Field(5.0, description="Spring constant for harmonically bonded sheets")
     driving_spring: Optional[float] = Field(50, description="Driving spring constant")
 
@@ -208,6 +222,37 @@ class SheetOnSheetSimulationConfig(BaseModel):
 
 # --- Helper Functions ---
 
+def _ensure_default_settings_files() -> None:
+    """Create settings files in src/data/settings if they are missing."""
+    settings_dir = Path(__file__).resolve().parents[1] / 'data' / 'settings'
+    settings_dir.mkdir(parents=True, exist_ok=True)
+
+    settings_path = settings_dir / 'settings.yaml'
+    if not settings_path.exists():
+        defaults = GlobalSettings()
+        settings_path.write_text(
+            yaml.safe_dump(defaults.model_dump(), sort_keys=False),
+            encoding='utf-8'
+        )
+
+    hpc_path = settings_dir / 'hpc.yaml'
+    if not hpc_path.exists():
+        hpc_defaults = GlobalSettings().hpc
+        hpc_payload = {
+            'label': 'hpc',
+            'scheduler': hpc_defaults.scheduler_type,
+            'transport': 'ssh',
+            'hostname': '',
+            'workdir': '',
+            'username': '',
+            'ssh_port': 22,
+            'key_filename': ''
+        }
+        hpc_path.write_text(
+            yaml.safe_dump(hpc_payload, sort_keys=False),
+            encoding='utf-8'
+        )
+
 def load_settings() -> GlobalSettings:
     """Load settings from package settings.yaml, or use hardcoded defaults.
 
@@ -218,6 +263,7 @@ def load_settings() -> GlobalSettings:
         GlobalSettings with values from settings.yaml if present, else defaults.
     """
     try:
+        _ensure_default_settings_files()
         settings_resource = resources.files('src.data.settings').joinpath('settings.yaml')
         if settings_resource.is_file():
             with settings_resource.open('r') as f:

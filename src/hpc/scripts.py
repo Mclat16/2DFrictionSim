@@ -6,8 +6,9 @@ on HPC clusters, supporting both PBS and SLURM schedulers.
 
 import json
 import math
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
+import shutil
 from typing import Any, Dict, List, Literal, Optional
 
 from jinja2 import Environment, FileSystemLoader
@@ -31,6 +32,9 @@ class HPCConfig:
     queue: Optional[str] = None
     partition: Optional[str] = None
     account: Optional[str] = None
+    hpc_home: Optional[str] = None
+    log_dir: Optional[str] = None
+    scratch_dir: Optional[str] = "$TMPDIR"
     modules: List[str] = field(default_factory=lambda: [
         'tools/prod',
         'LAMMPS/29Aug2024-foss-2023b-kokkos'
@@ -39,8 +43,8 @@ class HPCConfig:
     lmp_flags: str = "-l none"
     use_tmpdir: bool = True
     lammps_scripts: List[str] = field(default_factory=lambda: [
-        'system.lmp',
-        'slide.lmp'
+        'system.in',
+        'slide.in'
     ])
     max_array_size: int = 300
 
@@ -57,10 +61,15 @@ class HPCConfig:
             queue=hpc_settings.queue if hpc_settings.queue else None,
             partition=hpc_settings.partition,
             account=hpc_settings.account if hpc_settings.account else None,
+            hpc_home=getattr(hpc_settings, 'hpc_home', None),
+            log_dir=getattr(hpc_settings, 'log_dir', None),
+            scratch_dir=getattr(hpc_settings, 'scratch_dir', None),
             modules=hpc_settings.modules,
             mpi_command=hpc_settings.mpi_command,
             use_tmpdir=hpc_settings.use_tmpdir,
             max_array_size=hpc_settings.max_array_size,
+            lammps_scripts=getattr(hpc_settings, 'lammps_scripts', None)
+            or ['system.in', 'slide.in'],
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -74,12 +83,16 @@ class HPCConfig:
             'queue': self.queue,
             'partition': self.partition,
             'account': self.account,
+            'hpc_home': self.hpc_home,
+            'log_dir': self.log_dir,
+            'scratch_dir': self.scratch_dir,
             'modules': self.modules,
             'mpi_command': self.mpi_command,
             'lmp_flags': self.lmp_flags,
             'use_tmpdir': self.use_tmpdir,
             'lammps_scripts': self.lammps_scripts,
-            'select': f"1:ncpus={self.cpus_per_node}:mem={self.memory_gb}gb:mpiprocs={self.cpus_per_node}",
+            'select_multi': f"1:ncpus={self.cpus_per_node}:mem={self.memory_gb}gb:mpiprocs={self.cpus_per_node}",
+            'select_single': f"1:ncpus={self.cpus_per_node}:mem={self.memory_gb}gb",
             'ntasks_per_node': self.cpus_per_node,
             'cpus_per_task': 1,
             'mem': f"{self.memory_gb}G",
@@ -111,7 +124,7 @@ class HPCScriptGenerator:
             simulation_paths: List[str],
             output_dir: Path,
             base_dir: str = "$PBS_O_WORKDIR",
-            log_dir: str = "$HOME/logs") -> List[Path]:
+            log_dir: Optional[str] = None) -> List[Path]:
         """Generate PBS array job scripts.
 
         Args:
@@ -125,6 +138,13 @@ class HPCScriptGenerator:
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        effective_log_dir = log_dir or self.config.log_dir
+        if not effective_log_dir:
+            raise ValueError("HPC log_dir is required for PBS script generation.")
+        if not self.config.modules:
+            raise ValueError("HPC modules list is empty. Set hpc.modules in settings.")
+        if self.config.use_tmpdir and not self.config.scratch_dir:
+            raise ValueError("HPC scratch_dir is required when use_tmpdir is true.")
 
         n_sims = len(simulation_paths)
         n_scripts = math.ceil(n_sims / self.config.max_array_size)
@@ -141,12 +161,13 @@ class HPCScriptGenerator:
             manifest_path = output_dir / manifest_name
             manifest_path.write_text('\n'.join(chunk))
 
+            manifest_rel = f"{base_dir}/{output_dir.name}/{manifest_name}"
             context = self.config.to_dict()
             context.update({
                 'array_size': len(chunk),
-                'manifest_file': manifest_name,
+                'manifest_file': manifest_rel,
                 'base_dir': base_dir,
-                'log_dir': log_dir,
+                'log_dir': effective_log_dir,
             })
 
             if n_scripts > 1:
@@ -161,13 +182,13 @@ class HPCScriptGenerator:
         self._write_master_script(output_dir, scripts, 'pbs')
 
         return scripts
-    
+
     def generate_slurm_scripts(
             self,
             simulation_paths: List[str],
             output_dir: Path,
             base_dir: str = "$SLURM_SUBMIT_DIR",
-            log_dir: str = "$HOME/logs") -> List[Path]:
+            log_dir: Optional[str] = None) -> List[Path]:
         """Generate SLURM array job scripts.
 
         Args:
@@ -181,6 +202,13 @@ class HPCScriptGenerator:
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        effective_log_dir = log_dir or self.config.log_dir
+        if not effective_log_dir:
+            raise ValueError("HPC log_dir is required for SLURM script generation.")
+        if not self.config.modules:
+            raise ValueError("HPC modules list is empty. Set hpc.modules in settings.")
+        if self.config.use_tmpdir and not self.config.scratch_dir:
+            raise ValueError("HPC scratch_dir is required when use_tmpdir is true.")
 
         n_sims = len(simulation_paths)
         n_scripts = math.ceil(n_sims / self.config.max_array_size)
@@ -197,12 +225,13 @@ class HPCScriptGenerator:
             manifest_path = output_dir / manifest_name
             manifest_path.write_text('\n'.join(chunk))
 
+            manifest_rel = f"{base_dir}/{output_dir.name}/{manifest_name}"
             context = self.config.to_dict()
             context.update({
                 'array_size': len(chunk),
-                'manifest_file': manifest_name,
+                'manifest_file': manifest_rel,
                 'base_dir': base_dir,
-                'log_dir': log_dir,
+                'log_dir': effective_log_dir,
             })
 
             if n_scripts > 1:
@@ -223,7 +252,7 @@ class HPCScriptGenerator:
             output_dir: Path,
             scripts: List[Path],
             scheduler: Literal['pbs', 'slurm']) -> Path:
-        """Write a master script to submit all job arrays.
+        """Write a master instruction file to submit all job arrays.
 
         Args:
             output_dir: Directory to write script to
@@ -235,15 +264,26 @@ class HPCScriptGenerator:
         """
         submit_cmd = 'qsub' if scheduler == 'pbs' else 'sbatch'
 
-        lines = ['#!/bin/bash', '', '# Submit all job arrays', '']
-        for script in scripts:
-            lines.append(f'{submit_cmd} {script.name}')
+        sim_root = output_dir.parent
+        sim_dir_name = sim_root.name
+        hpc_home = self.config.hpc_home or "<HPC_HOME>/"
+        lines = [
+            '# Submit all job arrays',
+            '',
+            '# Optional: upload simulations to HPC',
+            f'# rsync -rvltoD {sim_dir_name} {hpc_home}',
+            '',
+            '# Optional: download results (and visuals) from HPC',
+            f'# rsync -avzhP --include="*/" --include="results/***" --include="visuals/***" --exclude="*" {hpc_home}{sim_dir_name} ./{sim_dir_name}',
+            '',
+        ]
+        lines.append(f'cd {sim_root}')
         lines.append('')
-        lines.append('echo "All jobs submitted."')
+        for script in scripts:
+            lines.append(f'{submit_cmd} {output_dir.name}/{script.name}')
 
-        master_path = output_dir / 'submit_all.sh'
+        master_path = output_dir / 'submit_all.txt'
         master_path.write_text('\n'.join(lines))
-        master_path.chmod(0o755)
 
         return master_path
 
@@ -347,7 +387,7 @@ This package contains {len(simulation_paths)} simulations ready for HPC executio
 ## Usage
 1. Transfer this entire directory to your HPC cluster
 2. Navigate to the `scripts/` directory
-3. Run `./submit_all.sh` to submit all jobs
+3. Follow `submit_all.txt` to submit all jobs
 4. Monitor job status with `{'qstat' if scheduler == 'pbs' else 'squeue'}`
 5. After completion, transfer results back
 

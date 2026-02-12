@@ -12,8 +12,9 @@ Interlayer interactions:
 """
 
 import logging
+import re
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Union
 
 from src.core.simulation_base import SimulationBase
 from src.core.config import SheetOnSheetSimulationConfig
@@ -45,6 +46,22 @@ class SheetOnSheetSimulation(SimulationBase):
         self.pm: Optional[PotentialManager] = None
         self.lat_c: Optional[float] = None
         self.sheet_dims: Optional[Dict] = None
+
+    @staticmethod
+    def _to_list(value: Optional[Union[float, List[float]]]) -> List[float]:
+        """Normalize scalar/list sweep values to a list of floats."""
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [float(v) for v in value]
+        return [float(value)]
+
+    @staticmethod
+    def _format_loop_value(value: float) -> str:
+        """Format a numeric sweep value into a filename-safe token."""
+        token = f"{value:g}"
+        token = token.replace('-', 'm').replace('.', 'p')
+        return re.sub(r'[^A-Za-z0-9_]+', '_', token)
 
     def build(self) -> None:
         """Constructs the 4-layer sheet stack."""
@@ -150,11 +167,9 @@ class SheetOnSheetSimulation(SimulationBase):
         rel_run_dir_str = str(self.relative_run_dir)
         atomic2molecular(f"{self.output_dir}/build/{self.structure_paths['sheet'].name}")
 
-        context = {
+        base_context = {
             'temp': self.config.general.temp,
-            'pressures': self.config.general.pressure,
             'scan_angle_config': self.config.general.scan_angle,
-            'scan_speed_config': self.config.general.scan_speed,
             'xlo': self.sheet_dims.get('xlo', 0.0),
             'xhi': self.sheet_dims.get('xhi', 100.0),
             'ylo': self.sheet_dims.get('ylo', 0.0),
@@ -194,7 +209,44 @@ class SheetOnSheetSimulation(SimulationBase):
             'thermostat_type': self.config.settings.thermostat.type,
         }
 
-        script = self.render_template("sheetonsheet/slide.lmp", context)
-        self.write_file("lammps/slide.in", script)
+        outer_loop = getattr(self.config.general, 'outer_loop', None)
+
+        if outer_loop not in ('pressure', 'scan_speed'):
+            context = dict(base_context)
+            context['pressures'] = self.config.general.pressure
+            context['scan_speed_config'] = self.config.general.scan_speed
+            script = self.render_template("sheetonsheet/slide.lmp", context)
+            self.write_file("lammps/slide.in", script)
+            logger.info("Using legacy single-script mode (slide.in).")
+            logger.info("Inputs written to %s/lammps/", self.output_dir)
+            return
+
+        speeds = self._to_list(self.config.general.scan_speed)
+        pressures = self._to_list(self.config.general.pressure)
+
+        if outer_loop == 'pressure':
+            outer_values = pressures or [0.0]
+            inner_speeds: Union[float, List[float]] = speeds if len(speeds) > 1 else (
+                speeds[0] if speeds else 0.0
+            )
+            for pressure in outer_values:
+                context = dict(base_context)
+                context['pressures'] = pressure
+                context['scan_speed_config'] = inner_speeds
+                script_name = f"slide_p{self._format_loop_value(float(pressure))}gpa.in"
+                script = self.render_template("sheetonsheet/slide.lmp", context)
+                self.write_file(f"lammps/{script_name}", script)
+        else:
+            outer_values = speeds or [0.0]
+            inner_pressures: Union[float, List[float]] = pressures if len(pressures) > 1 else (
+                pressures[0] if pressures else 0.0
+            )
+            for speed in outer_values:
+                context = dict(base_context)
+                context['pressures'] = inner_pressures
+                context['scan_speed_config'] = speed
+                script_name = f"slide_{self._format_loop_value(float(speed))}ms.in"
+                script = self.render_template("sheetonsheet/slide.lmp", context)
+                self.write_file(f"lammps/{script_name}", script)
 
         logger.info("Inputs written to %s/lammps/", self.output_dir)

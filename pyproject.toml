@@ -35,8 +35,12 @@ FrictionSim2D = "src.cli:main"
 [project.optional-dependencies]
 aiida = [
   "aiida-core>=2.0",
-  "aiida-core.services>=2.0",
+  "typing_extensions>=4.0",
   "psycopg2-binary>=2.9",
+  # rabbitmq-server and postgresql are system / conda dependencies.
+  # Install via:  conda install -c conda-forge aiida-core aiida-core.services
+  # Then run:     rabbitmq-server -detached
+  #               verdi presto --use-postgres
 ]
 plotting = [
   "matplotlib>=3.5",
@@ -52,6 +56,26 @@ all = [
   "FrictionSim2D[aiida,plotting]",
 ]
 
+# ---------------------------------------------------------------------------
+# AiiDA entry points — required for plugin discovery by aiida-core
+# ---------------------------------------------------------------------------
+[project.entry-points."aiida.data"]
+"friction2d.simulation"  = "src.aiida.data.simulation:FrictionSimulationData"
+"friction2d.results"     = "src.aiida.data.results:FrictionResultsData"
+"friction2d.provenance"  = "src.aiida.data.provenance:FrictionProvenanceData"
+
+[project.entry-points."aiida.calculations"]
+"friction2d.lammps" = "src.aiida.calcjob:LammpsFrictionCalcJob"
+
+[project.entry-points."aiida.parsers"]
+"friction2d.lammps" = "src.aiida.parser:LammpsFrictionParser"
+
+[project.entry-points."aiida.workflows"]
+"friction2d.friction" = "src.aiida.workchain:FrictionWorkChain"
+
+# ---------------------------------------------------------------------------
+# Test configuration
+# ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]

@@ -249,7 +249,7 @@ class Plotter:
                 raise ImportError("AiiDA not available. Install with: "
                                 "conda install -c conda-forge aiida-core")
             
-            from src.aiida.db import Friction2DDB
+            from src.aiida.query import Friction2DDB
         except ImportError as e:
             log.error(f"Cannot use database plotting: {e}")
             raise

@@ -1,3 +1,5 @@
+src/data/settings/settings.yaml
+src/data/settings/hpc.yaml
 visuals
 *.lammpstrj
 ptest

@@ -30,10 +30,10 @@ geometry:
 
 # Simulation run parameters
 simulation:
-  thermo: 100000             # Thermostat reporting interval
+  thermo: 1000             # Thermostat reporting interval
   timestep: 0.001            # Simulation timestep (in ps)
   neighbor_list: 0.3         # Neighbor list skin distance
-  slide_run_steps: 500000    # Number of steps for sliding run
+  slide_run_steps: 5000    # Number of steps for sliding run
   neigh_modify_command: 'neigh_modify    every 1 delay 0 check yes' # Neighbor list modification command
   min_style: 'cg'            # Minimization style (e.g., 'cg')
   minimization_command: 'minimize 1e-4 1e-8 1000000 1000000' # Minimization command
@@ -57,9 +57,13 @@ quench:
 # HPC cluster settings
 hpc:
   scheduler_type: 'pbs'           # 'pbs' or 'slurm'
-  queue: 'normal'                 # PBS queue name
+  hpc_config_path: null           # Optional path to hpc.yaml for AiiDA setup
+  queue: null                      # PBS queue name (optional)
   partition: null                 # SLURM partition (optional)
   account: ''                     # Account/project to charge (optional)
+  hpc_home: mv923@dtn-b.hpc.ic.ac.uk:/rds/general/user/mv923/home/
+  log_dir: /rds/general/user/mv923/home/logs_system_1  # Absolute path for HPC log files
+  scratch_dir: '$TMPDIR'           # Scratch directory on compute nodes ($EPHEMERAL or $TMPDIR)
   num_nodes: 1                    # Number of nodes per job
   num_cpus: 32                    # CPUs per node
   memory_gb: 62                   # Memory per node in GB
@@ -70,6 +74,9 @@ hpc:
     - 'LAMMPS/29Aug2024-foss-2023b-kokkos'
   mpi_command: 'mpirun'           # MPI launch command
   use_tmpdir: true                # Copy simulation to local temp directory on compute nodes
+  lammps_scripts:                 # Default LAMMPS scripts (order matters)
+    - 'system.in'
+    - 'slide.in'
 
 # AiiDA workflow settings (optional)
 aiida:

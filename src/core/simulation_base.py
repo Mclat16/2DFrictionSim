@@ -61,7 +61,8 @@ class SimulationBase(ABC):
             lstrip_blocks=True
         )
 
-    def _create_directories(self, output_dir: Optional[Path] = None, subdirs: Optional[List[str]] = None) -> None:
+    def _create_directories(self, output_dir: Optional[Path] = None,
+                            subdirs: Optional[List[str]] = None) -> None:
         """Creates standard simulation subdirectories.
 
         Args:
@@ -91,6 +92,19 @@ class SimulationBase(ABC):
         except Exception as e:
             logger.error("Failed to render template '%s': %s", template_name, e)
             raise
+
+    def set_base_output_dir(self, base_output_dir: Union[str, Path]) -> None:
+        """Set the base output directory and update relative run paths.
+
+        Args:
+            base_output_dir: Root directory that contains all simulations.
+        """
+        base_output_dir = Path(base_output_dir).resolve()
+        self.base_output_dir = base_output_dir
+        try:
+            self.relative_run_dir = self.output_dir.relative_to(base_output_dir)
+        except ValueError:
+            self.relative_run_dir = Path(self.output_dir)
 
     def write_file(self, filename: Union[str, Path],
                     content: str, output_dir: Optional[Union[str, Path]] = None) -> Path:
@@ -191,7 +205,6 @@ class SimulationBase(ABC):
         """
         manifest_path = self.output_dir / 'provenance' / 'manifest.json'
 
-        # Load or create manifest
         if manifest_path.exists():
             manifest_data = json.loads(manifest_path.read_text())
         else:
@@ -203,7 +216,6 @@ class SimulationBase(ABC):
 
         checksum = hashlib.sha256(original_path.read_bytes()).hexdigest()
 
-        # Check if file already in manifest
         search_criteria = (
             f for f in manifest_data['files']
             if f['filename'] == original_path.name
@@ -221,7 +233,6 @@ class SimulationBase(ABC):
         new_components = ensure_list(component)
 
         if existing:
-            # Merge components into existing entry and update metadata
             existing_components = ensure_list(existing.get('components'))
             for c in new_components:
                 if c and c not in existing_components:
@@ -281,6 +292,12 @@ class SimulationBase(ABC):
         It collects simulation paths and generates appropriate HPC scripts.
         """
 
+        if self.base_output_dir is not None and self.base_output_dir != self.output_dir:
+            logger.info(
+                "Skipping per-simulation HPC script generation; use base output dir instead."
+            )
+            return
+
         hpc_dir = self._get_hpc_output_dir()
         hpc_dir.mkdir(parents=True, exist_ok=True)
 
@@ -297,6 +314,13 @@ class SimulationBase(ABC):
             job_name=job_name
         )
 
+        if not hpc_config.log_dir:
+            raise ValueError("HPC log_dir is required to generate job scripts.")
+        if not hpc_config.modules:
+            raise ValueError("HPC modules list is empty; set hpc.modules in settings.")
+        if hpc_config.use_tmpdir and not hpc_config.scratch_dir:
+            raise ValueError("HPC scratch_dir is required when use_tmpdir is true.")
+
         generator = HPCScriptGenerator(hpc_config)
 
         base_dir = '$PBS_O_WORKDIR' if hpc_config.scheduler_type == 'pbs' else '$SLURM_SUBMIT_DIR'
@@ -306,7 +330,7 @@ class SimulationBase(ABC):
             output_dir=hpc_dir,
             scheduler=self.config.settings.hpc.scheduler_type,
             base_dir=base_dir,
-            log_dir='$HOME/logs'
+            log_dir=hpc_config.log_dir
         )
 
         logger.info("Generated %d HPC scripts in %s", len(scripts), hpc_dir)

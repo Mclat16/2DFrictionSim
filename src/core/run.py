@@ -1,0 +1,345 @@
+"""Shared simulation runner utilities.
+
+Provides config expansion, shared simulation-root layout, and HPC script
+generation used by both the CLI and Python scripts.
+"""
+
+from datetime import datetime
+import logging
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
+from copy import deepcopy
+import itertools
+
+from src.core.config import (
+    AFMSimulationConfig,
+    SheetOnSheetSimulationConfig,
+    load_settings,
+    parse_config,
+)
+from src.builders.afm import AFMSimulation
+from src.builders.sheetonsheet import SheetOnSheetSimulation
+from src.hpc import HPCScriptGenerator, HPCConfig
+
+logger = logging.getLogger(__name__)
+
+
+def expand_config_sweeps(base_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Expand config with material lists and parameter sweeps."""
+    sweep_params = {}
+
+    def resolve_materials_list(section_config: Dict[str, Any]) -> List[str]:
+        if 'materials_list' not in section_config:
+            return []
+
+        mat_list_path = section_config.get('materials_list', '')
+        if isinstance(mat_list_path, str) and mat_list_path.endswith(".txt"):
+            path = Path(mat_list_path)
+            if path.exists():
+                with open(path, 'r', encoding='utf-8') as f:
+                    return [line.strip() for line in f if line.strip()]
+            logger.warning("Material list file %s not found.", path)
+        return []
+
+    def expand_mat_template(section_config: Dict[str, Any], mat_value: str) -> Dict[str, Any]:
+        expanded = {}
+        for key, val in section_config.items():
+            if key == 'materials_list':
+                continue
+            if isinstance(val, str) and '{mat}' in val:
+                expanded[key] = val.replace('{mat}', mat_value)
+            else:
+                expanded[key] = val
+        return expanded
+
+    if '2D' in base_config:
+        materials = resolve_materials_list(base_config['2D'])
+        if materials:
+            sweep_params[('2D', '_material_expand')] = materials
+
+    lammps_loop_params = {'force', 'scan_angle', 'pressure', 'scan_speed'}
+
+    if 'general' in base_config:
+        for key, val in base_config['general'].items():
+            if isinstance(val, list) and key not in lammps_loop_params:
+                sweep_params[('general', key)] = val
+
+    if not sweep_params:
+        return [base_config]
+
+    keys, values = zip(*sweep_params.items())
+    permutations = [dict(zip(keys, v)) for v in itertools.product(*values)]
+
+    expanded_configs = []
+    for perm in permutations:
+        new_conf = deepcopy(base_config)
+
+        mat_value = perm.pop(('2D', '_material_expand'), None)
+        if mat_value and '2D' in new_conf:
+            new_conf['2D'] = expand_mat_template(new_conf['2D'], mat_value)
+
+        for (section, key), val in perm.items():
+            new_conf[section][key] = val
+
+        expanded_configs.append(new_conf)
+
+    return expanded_configs
+
+
+def collect_hpc_simulation_paths(
+    simulation_root: Path,
+    lammps_scripts: Optional[List[str]] = None,
+) -> List[str]:
+    """Collect simulation paths relative to a shared simulation root."""
+    scripts = lammps_scripts or ['system.in', 'slide.in']
+
+    def script_exists(lammps_dir: Path, script_name: str) -> bool:
+        if '*' in script_name or '?' in script_name:
+            return any(lammps_dir.glob(script_name))
+        if script_name == 'system.in':
+            return (
+                (lammps_dir / 'system.in').exists()
+                or any(lammps_dir.glob('*system*.in'))
+            )
+        if script_name == 'slide.in':
+            return (
+                (lammps_dir / 'slide.in').exists()
+                or any(lammps_dir.glob('*slide*.in'))
+            )
+        return (lammps_dir / script_name).exists()
+
+    simulation_paths = []
+    for lammps_dir in simulation_root.rglob('lammps'):
+        if not lammps_dir.is_dir():
+            continue
+
+        if not any(script_exists(lammps_dir, script) for script in scripts):
+            continue
+
+        if not scripts and not list(lammps_dir.glob('*.in')):
+            continue
+
+        rel_path = lammps_dir.parent.relative_to(simulation_root)
+        simulation_paths.append(str(rel_path))
+    return sorted(set(simulation_paths))
+
+
+def _resolve_hpc_lammps_scripts(
+    simulation_root: Path,
+    simulation_paths: List[str],
+    configured_scripts: List[str],
+) -> List[str]:
+    """Resolve configured scripts into concrete script names for HPC templates.
+
+    In split-script mode, ``slide.in`` is replaced by discovered ``slide_*.in``
+    names (must be consistent across simulation directories).
+    """
+    if 'slide.in' not in configured_scripts:
+        return configured_scripts
+
+    for sim_rel in simulation_paths:
+        lammps_dir = simulation_root / sim_rel / 'lammps'
+        if not lammps_dir.exists():
+            continue
+
+        if any(lammps_dir.glob('slide_*.in')):
+            return [
+                script for script in configured_scripts if script != 'slide.in'
+            ] + ['__MANIFEST_SCRIPT__']
+
+    return configured_scripts
+
+
+def _build_hpc_manifest_entries(
+    simulation_root: Path,
+    simulation_paths: List[str],
+    configured_scripts: List[str],
+) -> Tuple[List[str], List[str]]:
+    """Build manifest rows as full script paths discovered from built outputs.
+
+    Each row is a full script path relative to ``simulation_root`` such as
+    ``sheetonsheet/.../lammps/slide_p1gpa.in``.
+
+    Discovery strategy per simulation directory:
+        - If any ``*slide*.in`` files exist, add all of them (array-per-slide).
+        - Otherwise add all ``*system*.in`` files.
+    """
+    manifest_entries: List[str] = []
+
+    for sim_rel in simulation_paths:
+        lammps_dir = simulation_root / sim_rel / 'lammps'
+        if not lammps_dir.exists():
+            continue
+
+        system_scripts = sorted(
+            p.relative_to(simulation_root).as_posix()
+            for p in lammps_dir.glob('*.in')
+            if 'system' in p.name
+        )
+        slide_scripts = sorted(
+            p.relative_to(simulation_root).as_posix()
+            for p in lammps_dir.glob('*.in')
+            if 'slide' in p.name
+        )
+
+        if slide_scripts:
+            manifest_entries.extend(slide_scripts)
+        elif system_scripts:
+            manifest_entries.extend(system_scripts)
+
+    if manifest_entries:
+        return manifest_entries, ['__MANIFEST_PATH__']
+
+    return simulation_paths, configured_scripts
+
+
+def generate_hpc_scripts_for_root(simulation_root: Path, settings) -> None:
+    """Generate shared HPC scripts for a simulation root directory."""
+
+    hpc_config = HPCConfig.from_settings(settings.hpc)
+    simulation_paths = collect_hpc_simulation_paths(
+        simulation_root,
+        lammps_scripts=hpc_config.lammps_scripts,
+    )
+    if not simulation_paths:
+        logger.warning("No simulations found for HPC script generation.")
+        return
+
+    if not hpc_config.log_dir:
+        raise ValueError("HPC log_dir is required to generate job scripts.")
+
+    manifest_entries, resolved_scripts = _build_hpc_manifest_entries(
+        simulation_root,
+        simulation_paths,
+        hpc_config.lammps_scripts,
+    )
+    hpc_config.lammps_scripts = resolved_scripts
+
+    if hpc_config.hpc_home:
+        hpc_home = hpc_config.hpc_home.rstrip('/')
+        if ':' in hpc_home:
+            _, hpc_home_path = hpc_home.split(':', 1)
+        else:
+            hpc_home_path = hpc_home
+        per_sim_log_dir = Path(f"{hpc_home_path}/{simulation_root.name}/logs")
+    else:
+        log_base = Path(hpc_config.log_dir).parent
+        per_sim_log_dir = log_base / f"logs_{simulation_root.name}"
+
+    hpc_dir = simulation_root / 'hpc'
+    hpc_dir.mkdir(parents=True, exist_ok=True)
+
+    if hpc_config.scheduler_type == 'pbs':
+        base_dir = '$PBS_O_WORKDIR'
+    else:
+        base_dir = '$SLURM_SUBMIT_DIR'
+    generator = HPCScriptGenerator(hpc_config)
+    generator.generate_scripts(
+        simulation_paths=manifest_entries,
+        output_dir=hpc_dir,
+        scheduler=hpc_config.scheduler_type,
+        base_dir=base_dir,
+        log_dir=str(per_sim_log_dir)
+    )
+
+
+def run_simulations(
+    config_file: str,
+    model: str,
+    output_root: Optional[Union[str, Path]] = None,
+    ensure_hpc_settings=None,
+    use_aiida: bool = False,
+    generate_hpc: bool = False,
+    simulation_root_name: Optional[str] = None,
+) -> Tuple[List[Path], Path, List[Dict[str, Any]], Any]:
+    """Run all simulations defined in a config file.
+
+    Returns a tuple of (created_simulations, simulation_root, configs_to_run, settings).
+    """
+    config_path = Path(config_file)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    base_dict = parse_config(config_path)
+    defaults = load_settings()
+
+    if use_aiida:
+        defaults.aiida.enabled = True
+        defaults.aiida.create_provenance = True
+
+    if model == 'sheetonsheet':
+        if defaults.hpc.lammps_scripts == ['system.in', 'slide.in']:
+            defaults.hpc.lammps_scripts = ['slide.in']
+    elif model == 'afm':
+        if defaults.hpc.lammps_scripts == ['slide.in']:
+            defaults.hpc.lammps_scripts = ['system.in', 'slide.in']
+
+    if ensure_hpc_settings is not None:
+        ensure_hpc_settings(defaults.hpc)
+
+    configs_to_run = expand_config_sweeps(base_dict)
+
+    root_name = simulation_root_name or datetime.now().strftime("simulation_%Y%m%d_%H%M%S")
+    base_root = Path(output_root) if output_root is not None else Path.cwd()
+    simulation_root = base_root / root_name
+    simulation_root.mkdir(parents=True, exist_ok=True)
+    (simulation_root / 'logs').mkdir(parents=True, exist_ok=True)
+
+    created_simulations: List[Path] = []
+
+    for run_dict in configs_to_run:
+        run_dict['settings'] = defaults.dict()
+
+        mat = run_dict['2D'].get('mat', 'unknown')
+        x = run_dict['2D'].get('x', 100)
+        y = run_dict['2D'].get('y', 100)
+        temp = run_dict['general'].get('temp', 300)
+
+        if model == "afm":
+            tip_mat = run_dict.get('tip', {}).get('mat', 'Si')
+            tip_amorph = run_dict.get('tip', {}).get('amorph', 'c')
+            tip_r = run_dict.get('tip', {}).get('r', 25)
+            sub_mat = run_dict.get('sub', {}).get('mat', 'Si')
+            sub_amorph = run_dict.get('sub', {}).get('amorph', 'a')
+
+            sub_str = f"{sub_amorph}{sub_mat}" if sub_amorph == 'a' else sub_mat
+            tip_str = f"{tip_amorph}{tip_mat}" if tip_amorph == 'a' else tip_mat
+
+            output_dir = (
+                simulation_root / "afm" / mat / f"{x}x_{y}y" /
+                f"sub_{sub_str}_tip_{tip_str}_r{int(tip_r)}" /
+                f"K{int(temp)}"
+            )
+        else:
+            output_dir = (
+                simulation_root / "sheetonsheet" / mat / f"{x}x_{y}y" /
+                f"K{int(temp)}"
+            )
+
+        prov_dir = output_dir / 'provenance'
+        prov_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if model == 'afm':
+                config_obj = AFMSimulationConfig(**run_dict)
+                config_json_path = prov_dir / 'config.json'
+                config_json_path.write_text(config_obj.model_dump_json(indent=2), encoding='utf-8')
+                builder = AFMSimulation(config_obj, output_dir, config_path=str(config_json_path))
+            else:
+                config_obj = SheetOnSheetSimulationConfig(**run_dict)
+                config_json_path = prov_dir / 'config.json'
+                config_json_path.write_text(config_obj.model_dump_json(indent=2), encoding='utf-8')
+                builder = SheetOnSheetSimulation(config_obj, output_dir, config_path=str(config_json_path))
+
+            builder.set_base_output_dir(simulation_root)
+            builder.build()
+            created_simulations.append(output_dir)
+
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error("Build failed for %s: %s", output_dir, exc)
+            continue
+
+    if generate_hpc and created_simulations:
+        generate_hpc_scripts_for_root(simulation_root, defaults)
+
+    return created_simulations, simulation_root, configs_to_run, defaults

@@ -2,7 +2,7 @@
 {% set version = "0.1.0" %}
 
 package:
-  name: {{ name|lower }}
+  name: {{ name|lower }}-meta
   version: {{ version }}
 
 source:
@@ -10,42 +10,63 @@ source:
 
 build:
   number: 0
-  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
-  entry_points:
-    - FrictionSim2D = FrictionSim2D.cli:main
+  noarch: python
 
-requirements:
-  host:
-    - python >=3.9
-    - pip
-    - hatchling
-  run:
-    - python >=3.9
-    # --- Scientific Binaries (Conda installs these!) ---
-    - atomsk
-    - lammps
-    # --- Python Dependencies (Conda installs these!) ---
-    - numpy >=1.21
-    - ase >=3.22
-    - pyyaml >=6.0
-    - jinja2 >=3.1
-    - pydantic >=2.0
-    # --- Optional: AiiDA dependencies ---
-    # Uncomment these for AiiDA workflow support:
-    # - aiida-core >=2.0
-    # - postgresql
-    # - rabbitmq-server
-    # - click >=8.0
-    # - pandas >=1.5
+outputs:
+  # -----------------------------------------------------------------------
+  # Base package: conda install frictionsim2d
+  # -----------------------------------------------------------------------
+  - name: {{ name|lower }}
+    build:
+      script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+      entry_points:
+        - FrictionSim2D = src.cli:main
+    requirements:
+      host:
+        - python >=3.9
+        - pip
+        - hatchling
+      run:
+        - python >=3.9
+        # --- Scientific Binaries ---
+        - atomsk
+        - lammps
+        # --- Python Dependencies ---
+        - numpy >=1.21
+        - ase >=3.22
+        - pyyaml >=6.0
+        - jinja2 >=3.1
+        - pydantic >=2.0
+        - click >=8.0
+        - pandas >=1.5
+    test:
+      imports:
+        - src
+      commands:
+        - FrictionSim2D --help
+        - atomsk --version
+        - lmp -h
 
-test:
-  imports:
-    - FrictionSim2D
-  commands:
-    - FrictionSim2D --help
-    # Verify external tools are reachable
-    - atomsk --version
-    - lmp -h
+  # -----------------------------------------------------------------------
+  # AiiDA variant: conda install frictionsim2d-aiida
+  # Installs the base package + aiida-core + rabbitmq + postgresql
+  # -----------------------------------------------------------------------
+  - name: {{ name|lower }}-aiida
+    requirements:
+      run:
+        - {{ pin_subpackage(name|lower, exact=True) }}
+        - aiida-core >=2.0
+        - aiida-core.services >=2.0   # bundles rabbitmq-server + postgresql
+        - typing_extensions >=4.0
+        - psycopg2 >=2.9
+    test:
+      imports:
+        - src
+        - aiida
+      commands:
+        - FrictionSim2D --help
+        - verdi --version
+        - rabbitmqctl help  # confirm rabbitmq binary is available
 
 about:
   home: https://github.com/Mclat16/FrictionSim2D
