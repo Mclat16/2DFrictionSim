@@ -1,0 +1,89 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "FrictionSim2D"
+version = "0.1.0"
+description = "A tool for generating LAMMPS input scripts for 2D material friction simulations."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+  {name = "Matteo Valderrama", email = "m.valderrama23@imperial.ac.uk"},
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+  "numpy>=1.21",
+  "ase>=3.22",
+  "lammps>=2023.8.2",  # Python bindings for LAMMPS
+  "PyYAML>=6.0",
+  "jinja2>=3.1",
+  "pydantic>=2.0",
+  "click>=8.0",
+  "pandas>=1.5",
+]
+
+[project.scripts]
+FrictionSim2D = "src.cli:main"
+
+[project.optional-dependencies]
+aiida = [
+  "aiida-core>=2.0",
+  "typing_extensions>=4.0",
+  "psycopg2-binary>=2.9",
+  # rabbitmq-server and postgresql are system / conda dependencies.
+  # Install via:  conda install -c conda-forge aiida-core aiida-core.services
+  # Then run:     rabbitmq-server -detached
+  #               verdi presto --use-postgres
+]
+plotting = [
+  "matplotlib>=3.5",
+  "seaborn>=0.12",
+  "scipy>=1.8",
+]
+dev = [
+  "pytest>=7.0",
+  "pytest-cov>=4.0",
+  "pylint>=2.15",
+]
+all = [
+  "FrictionSim2D[aiida,plotting]",
+]
+
+# ---------------------------------------------------------------------------
+# AiiDA entry points — required for plugin discovery by aiida-core
+# ---------------------------------------------------------------------------
+[project.entry-points."aiida.data"]
+"friction2d.simulation"  = "src.aiida.data.simulation:FrictionSimulationData"
+"friction2d.results"     = "src.aiida.data.results:FrictionResultsData"
+"friction2d.provenance"  = "src.aiida.data.provenance:FrictionProvenanceData"
+
+[project.entry-points."aiida.calculations"]
+"friction2d.lammps" = "src.aiida.calcjob:LammpsFrictionCalcJob"
+
+[project.entry-points."aiida.parsers"]
+"friction2d.lammps" = "src.aiida.parser:LammpsFrictionParser"
+
+[project.entry-points."aiida.workflows"]
+"friction2d.friction" = "src.aiida.workchain:FrictionWorkChain"
+
+# ---------------------------------------------------------------------------
+# Test configuration
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/**"]

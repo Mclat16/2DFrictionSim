@@ -1,0 +1,189 @@
+# LAMMPS Input Script for Sheet-vs-Sheet Sliding
+
+{% if scan_speed_config is iterable and scan_speed_config is not string %}
+variable        speed index {{ scan_speed_config | join(' ') }}
+label           speed_loop
+{% else %}
+variable        speed equal {{ scan_speed_config }}
+{% endif %}
+
+{% if pressures is iterable and pressures is not string %}
+variable        pressure index {{ pressures | join(' ') }}
+label           pressure_loop
+{% else %}
+variable        pressure equal {{ pressures }}
+{% endif %}
+
+{% if scan_angle_config is iterable and scan_angle_config is not string %}
+{% if scan_angle_config|length >= 3 %}
+{% set angle_values = range(scan_angle_config[0]|int, (scan_angle_config[1] + 1)|int, scan_angle_config[2]|int) | list %}
+variable        a index {{ angle_values | join(' ') }}
+{% else %}
+variable        a index {{ scan_angle_config | join(' ') }}
+{% endif %}
+label           angle_loop
+{% else %}
+variable        a equal {{ scan_angle_config }}
+{% endif %}
+
+clear
+units           metal
+atom_style      molecular
+boundary        p p p
+
+neighbor        {{ neighbor_list }} bin
+{{ neigh_modify_command }}
+
+comm_style      tiled
+
+region          box block {{ xlo }} {{ xhi }} {{ ylo }} {{ yhi }} -15.0 {{zhi + 15}} units box
+create_box      {{ num_atom_types }} box bond/types 1 extra/bond/per/atom 100
+
+read_data       {{ data_file }} extra/bond/per/atom 100 add append group bot
+
+include         {{ potential_file }}
+
+bond_style      harmonic
+bond_coeff      1 {{ bond_spring_ev }} {{ lat_c }}
+create_bonds    many layer_3 layer_4 1 {{ bond_min }} {{ bond_max }}
+
+{% if dump_enabled %}
+dump            sys all atom {{ dump_freq }} {{ dump_file_pattern }}
+{% endif %}
+
+balance         1.0 rcb
+
+min_style       {{ min_style }}
+{{ minimization_command }}
+
+group           center union layer_2 layer_3
+velocity        center create {{ temp }} {{ range(1, 999999) | random }}
+fix             lang center langevin {{ temp }} {{ temp }} $(100.0*dt) {{ range(1, 999999) | random }} zero yes
+fix             nve_center center nve
+
+timestep        {{ timestep }}
+thermo          {{ thermo }}
+
+fix             fstage_top layer_4 rigid/nve single force * on on on torque * off off off
+fix             fsbot layer_1 setforce 0.0 0.0 0.0
+velocity        layer_1 set 0.0 0.0 0.0 units box
+
+compute         COM_top layer_4 com
+variable        comx_top equal c_COM_top[1]
+variable        comy_top equal c_COM_top[2]
+variable        comz_top equal c_COM_top[3]
+
+compute         COM_ctop layer_3 com
+variable        comx_ctop equal c_COM_ctop[1]
+variable        comy_ctop equal c_COM_ctop[2]
+variable        comz_ctop equal c_COM_ctop[3]
+
+compute         COM_cbot layer_2 com
+variable        comx_cbot equal c_COM_cbot[1]
+variable        comy_cbot equal c_COM_cbot[2]
+variable        comz_cbot equal c_COM_cbot[3]
+
+compute         COM_bot layer_1 com
+variable        comx_bot equal c_COM_bot[1]
+variable        comy_bot equal c_COM_bot[2]
+variable        comz_bot equal c_COM_bot[3]
+
+# Apply Uniform Pressure
+# 1 eV/Å^3 = 160.2176621 GPa
+variable        A equal ({{ xhi }}-{{ xlo }})*({{ yhi }}-{{ ylo }})
+variable        p equal v_pressure/160.2176565 
+variable        f equal -v_p*v_A/(count(layer_4))
+
+fix             force layer_4 aveforce 0.0 0.0 $f
+
+variable        fx equal f_force[1]*1.602176565
+variable        fy equal f_force[2]*1.602176565
+variable        fz equal f_force[3]*1.602176565
+variable        sx equal f_fsbot[1]*1.602176565
+variable        sy equal f_fsbot[2]*1.602176565
+variable        sz equal f_fsbot[3]*1.602176565
+
+compute         frict layer_3 group/group layer_2
+variable        xfrict equal c_frict[1]
+variable        yfrict equal c_frict[2]
+
+run             10000
+
+thermo_style    custom v_comz_top v_comz_ctop
+run             0
+thermo_style    multi
+
+variable        r0_new equal v_comz_top-v_comz_ctop
+bond_coeff      1 {{ bond_spring_ev }} ${r0_new}
+
+velocity        layer_4 set 0.0 0.0 0.0 units box
+
+variable        speed_x equal cos(v_a*PI/180)
+variable        speed_y equal sin(v_a*PI/180)
+
+{% if drive_method == 'smd' %}
+fix             spr layer_4 smd cvel {{ driving_spring_ev }} ${speed/100} tether $(v_speed_x) $(v_speed_y) NULL 0.0
+
+{% elif drive_method == 'fix_move' %}
+velocity        layer_4 set $(v_speed_x*${speed}/100) $(v_speed_y*${speed}/100) 0.0
+
+{% elif drive_method == 'virtual_atom' %}
+variable        virtual_x equal $(v_comx_top)
+variable        virtual_y equal $(v_comy_top)
+variable        virtual_z equal $(v_comz_top)+10
+
+create_atoms    {{ num_atom_types}} single $(v_virtual_x) $(v_virtual_y) $(v_virtual_z) units box
+group           virtual type {{num_atom_types}}
+velocity        virtual set 0.0 0.0 0.0
+
+fix             spr layer_4 spring couple virtual {{ driving_spring_ev }} 0.0 0.0 NULL 0
+fix             move_virtual virtual move linear $(v_speed*v_speed_x/100) $(v_speed*v_speed_y/100) 0.0
+{% endif %}
+
+fix             fc_ave all ave/time 1 1000 {{ results_freq }} v_xfrict v_yfrict v_sx v_sy v_sz v_fx v_fy v_fz v_comx_ctop v_comy_ctop v_comz_ctop v_comx_cbot v_comy_cbot v_comz_cbot file {{ results_file_pattern }}
+
+run             {{ run_steps }}
+
+{% if scan_angle_config is iterable and scan_angle_config is not string %}
+{% if scan_angle_config|length >= 4 %}
+if              '$(v_a) == {{ scan_angle_config[1] }}' then jump SELF pressure_incr
+
+{% if scan_angle_config[3] is number %}
+if              '$(v_pressure) == {{ scan_angle_config[3] }}' then &
+                "next a" &
+                "clear" &
+                "jump SELF angle_loop"
+{% else %}
+next            a
+clear
+jump            SELF angle_loop
+{% endif %}
+
+label           pressure_incr
+{% else %}
+next            a
+clear
+jump            SELF angle_loop
+{% endif %}
+{% endif %}
+
+{% if pressures is iterable and pressures is not string %}
+next            pressure
+clear
+{% if scan_angle_config is iterable and scan_angle_config is not string %}
+variable        a delete
+{% endif %}
+jump            SELF pressure_loop
+{% endif %}
+
+{% if scan_speed_config is iterable and scan_speed_config is not string %}
+next            speed
+clear
+{% if pressures is iterable and pressures is not string %}
+variable        pressure delete
+{% endif %}
+{% if scan_angle_config is iterable and scan_angle_config is not string %}
+variable        a delete
+{% endif %}
+jump            SELF speed_loop
+{% endif %}

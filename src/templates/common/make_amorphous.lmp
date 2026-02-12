@@ -1,0 +1,40 @@
+# LAMMPS input script for melt-quench amorphization
+
+clear
+
+units           metal
+atom_style      atomic
+boundary        p p p
+neighbor        {{ neighbor_list }} bin
+{{ neigh_modify_command }}
+
+read_data       {{ base_block }}
+
+# Potential commands
+{% for cmd in pot_commands %}
+{{ cmd }}
+{% endfor %}
+
+min_style       {{ min_style }}
+{{ minimization_command }}
+
+timestep        {{ timestep }}
+thermo          1000
+thermo_style    custom step temp pe ke etotal press vol
+
+velocity        all create {{ melt_temp }} {{ range(1, 999999) | random }} rot yes dist gaussian
+run             0
+
+fix             melt all npt temp {{ melt_temp }} {{ melt_temp }} $(100.0*dt) iso 0.0 0.0 $(1000.0*dt)
+run             {{ melt_steps }}
+unfix           melt
+
+fix             quench all npt temp {{ melt_temp }} {{ quench_temp }} $(100.0*dt) iso 0.0 0.0 $(1000.0*dt)
+run             {{ quench_nsteps }}
+unfix           quench
+
+fix             relax all npt temp {{ quench_temp }} {{ quench_temp }} $(100.0*dt) iso 0.0 0.0 $(1000.0*dt)
+run             {{ equilibrate_steps }}
+unfix           relax
+
+write_data      {{ amor_file }}

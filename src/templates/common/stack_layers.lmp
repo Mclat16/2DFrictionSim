@@ -1,0 +1,51 @@
+# LAMMPS commands for stacking multilayer 2D material sheets
+# Generated from template: stack_layers.lmp
+
+clear
+units metal
+atom_style atomic
+boundary p p p
+
+region box block {{ box_xlo }} {{ box_xhi }} {{ box_ylo }} {{ box_yhi }} -10 {{ box_zhi }}
+create_box {{ total_types }} box
+
+{% for layer_idx in range(n_layers) %}
+read_data {{ base_layer_path }} add append shift 0 0 {{ layer_shifts[layer_idx] }} group layer_{{ layer_idx + 1 }}
+{% if layer_idx > 0 %}
+displace_atoms layer_{{ layer_idx + 1 }} move {{ layer_shifts_x[layer_idx] }} {{ layer_shifts_y[layer_idx] }} 0 units box
+{% endif %}
+{% endfor %}
+
+{% for type_idx in range(1, types_per_layer + 1) %}
+group 2D_{{ type_idx }} type {{ type_idx }}
+{% endfor %}
+
+{% set g = namespace(value=0) %}
+{% set i = namespace(value=0) %}
+{% for element, count in pot_counts.items() %}
+{% for layer_idx in range(1, n_layers + 1) %}
+{% for t in range(1, count + 1) %}
+{% set n = i.value + t %}
+{% set g.value = g.value + 1 %}
+group 2Dtype intersect 2D_{{ n }} layer_{{ layer_idx }}
+set group 2Dtype type {{ g.value }}
+group 2Dtype delete
+{% endfor %}
+{% endfor %}
+{% set i.value = i.value + count %}
+{% endfor %}
+
+include {{ pot_file }}
+run 0
+
+{% if calculate_lat_c %}
+# Minimization to find optimal interlayer distance
+min_style {{ min_style }}
+{{ minimization_command }}
+timestep {{ timestep }}
+variable z1 equal xcm(layer_1,z)
+variable z2 equal xcm(layer_2,z)
+variable lat_c equal v_z2-v_z1
+{% endif %}
+
+write_data {{ output_path }}
