@@ -2,7 +2,7 @@
 
 clear
 units           metal
-atom_style      atomic
+atom_style      {{ atom_style }}
 boundary        p p p
 
 neighbor        {{ neighbor_list }} bin

@@ -34,6 +34,12 @@ from src.core.utils import (
     renumber_atom_types,
     check_potential_cif_compatibility,
 )
+from src.core.run import (
+    expand_config_sweeps,
+    collect_hpc_simulation_paths,
+    generate_hpc_scripts_for_root,
+    run_simulations,
+)
 
 __all__ = [
     "ComponentConfig",
@@ -59,4 +65,8 @@ __all__ = [
     "atomic2molecular",
     "renumber_atom_types",
     "check_potential_cif_compatibility",
+    "expand_config_sweeps",
+    "collect_hpc_simulation_paths",
+    "generate_hpc_scripts_for_root",
+    "run_simulations",
 ]

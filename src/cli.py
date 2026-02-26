@@ -10,7 +10,6 @@ import tarfile
 from pathlib import Path
 from typing import List, Dict, Any, Optional, cast, NoReturn
 from importlib import resources as pkg_resources
-from datetime import datetime
 import yaml
 import click
 
@@ -354,7 +353,6 @@ def hpc_generate(simulation_dir: str, scheduler: str, output_dir: Optional[str])
         simulation_paths=manifest_entries,
         output_dir=out_dir,
         scheduler=scheduler,  # type: ignore[arg-type]
-        log_dir=hpc_config.log_dir,
         base_dir=base_dir
     )
 
@@ -487,27 +485,50 @@ def aiida_query(material: Optional[str], layers: Optional[int], force: Optional[
 @click.option('--lammps-path', type=click.Path(),
               help='Explicit path to LAMMPS executable')
 @click.option('--hpc-config', type=click.Path(exists=True),
-              help='Path to hpc.yaml for PBS/SLURM computer setup')
-def aiida_setup(profile: Optional[str], lammps_path: Optional[str], hpc_config: Optional[str]):
+              help='(Deprecated) Path to hpc.yaml for PBS/SLURM computer setup')
+@click.option('--use-remote', is_flag=True,
+              help='Configure remote HPC computer using settings from settings.yaml')
+def aiida_setup(profile: Optional[str], lammps_path: Optional[str],
+                hpc_config: Optional[str], use_remote: bool):
     """Set up AiiDA profile, computer, and LAMMPS code.
 
-    Performs first-time AiiDA configuration on the current machine:
-    creates a profile (via verdi presto), registers localhost as a
-    computer, and configures the LAMMPS code.
+    Performs first-time AiiDA configuration:
+    - Creates a profile (via verdi presto)
+    - Registers localhost or remote HPC as a computer
+    - Configures the LAMMPS code
+
+    For remote HPC setup, configure the AiiDA section in settings.yaml with
+    hostname, username, workdir, etc., then use --use-remote flag.
 
     Example::
 
         FrictionSim2D aiida setup
         FrictionSim2D aiida setup --lammps-path /usr/local/bin/lmp_mpi
+        FrictionSim2D aiida setup --use-remote  # Uses settings.yaml AiiDA config
     """
     from src.aiida.setup import full_setup
+    from src.core.config import load_settings
 
     click.echo("🔧 Running AiiDA first-time setup ...")
+
+    # Load HPC settings if using remote
+    hpc_settings = None
+    aiida_settings = None
+    if use_remote:
+        settings = load_settings()
+        hpc_settings = settings.hpc
+        aiida_settings = settings.aiida
+        click.echo(f"📡 Configuring remote HPC: {aiida_settings.hostname or 'localhost'}")
+
+    if hpc_config:
+        click.echo("⚠️  --hpc-config is deprecated. Use --use-remote with settings.yaml instead.")
+
     try:
         full_setup(
             profile_name=profile or 'friction2d',
             lammps_executable=lammps_path,
-            hpc_config=Path(hpc_config) if hpc_config else None,
+            hpc_settings=hpc_settings,
+            aiida_settings=aiida_settings,
         )
         click.echo("✅ AiiDA setup complete")
     except Exception as exc:  # pylint: disable=broad-except
@@ -587,121 +608,151 @@ def aiida_package(simulation_dir: str, output: Optional[str]):
 
 @aiida_group.command('submit')
 @click.argument('simulation_dir', type=click.Path(exists=True))
-@click.option('--code', '-c', default='lammps@localhost',
-              help='AiiDA code label (default: lammps@localhost)')
+@click.option('--code', '-c', default=None,
+              help='AiiDA code label (auto-detects if not specified)')
 @click.option('--scripts', default=None,
               help='Comma-separated list of LAMMPS scripts to run in order')
 @click.option('--array', 'use_array', is_flag=True,
               help='Submit a single array job for all simulations')
-@click.option('--scheduler', type=click.Choice(['pbs', 'slurm']), default='pbs',
-              help='Scheduler type for array directives')
 @click.option('--machines', type=int, default=None,
-              help='Number of machines per job')
+              help='Override: Number of machines per job')
 @click.option('--mpiprocs', type=int, default=None,
-              help='MPI processes per machine')
+              help='Override: MPI processes per machine')
 @click.option('--walltime', type=str, default=None,
-              help='Walltime (seconds or HH:MM:SS)')
+              help='Override: Walltime (HH:MM:SS or hours)')
 @click.option('--queue', type=str, default=None,
-              help='Scheduler queue name')
+              help='Override: Scheduler queue name')
 @click.option('--project', type=str, default=None,
-              help='Scheduler project/account')
-@click.option('--mem', type=str, default=None,
-              help='Memory request (e.g., 62gb)')
-@click.option('--prepend-text', 'prepend_text', multiple=True,
-              help='Lines to prepend to the job script (e.g., module load)')
+              help='Override: Scheduler project/account')
 @click.option('--dry-run', is_flag=True,
-              help='Validate inputs without submitting')
+              help='Preview configuration without submitting')
 def aiida_submit(
     simulation_dir: str,
-    code: str,
+    code: Optional[str],
     scripts: Optional[str],
     use_array: bool,
-    scheduler: str,
     machines: Optional[int],
     mpiprocs: Optional[int],
     walltime: Optional[str],
     queue: Optional[str],
     project: Optional[str],
-    mem: Optional[str],
-    prepend_text: tuple,
     dry_run: bool,
 ):
-    """Submit simulations to HPC via the AiiDA CalcJob.
+    """Submit simulations to AiiDA with smart defaults and prompting.
 
-    Scans SIMULATION_DIR for LAMMPS run directories and submits each
-    one as an AiiDA CalcJob for provenance-tracked execution.
+    Automatically detects codes, uses settings.yaml defaults,
+    and prompts for essential missing values. Manual overrides are supported.
 
-    Example::
+    Examples:
 
-        FrictionSim2D aiida submit ./afm_output -c lammps@hpc
+    # Minimal usage (auto-detect code, use defaults)
+      FrictionSim2D aiida submit ./afm_output
+
+      # With manual overrides
+      FrictionSim2D aiida submit ./output --machines 4 --walltime 24:00:00
+
+      # Preview before submitting
+      FrictionSim2D aiida submit ./output --dry-run
     """
-    from src.aiida.calcjob import submit_batch, submit_array
-    from aiida.orm import load_code
+    from src.aiida.submit import smart_submit
 
     sim_path = Path(simulation_dir)
-    click.echo(f"🚀 Submitting simulations from {sim_path} ...")
+    click.echo(f"🚀 Preparing submission from {sim_path}\n")
 
     try:
-        code_node = load_code(code)
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.exception("AiiDA code lookup failed")
-        _raise_abort(f"❌ Code '{code}' not found. Run 'aiida setup' first.", exc)
+        # Collect manual overrides
+        overrides = {}
+        if machines is not None:
+            overrides['machines'] = machines
+        if mpiprocs is not None:
+            overrides['mpiprocs'] = mpiprocs
+        if walltime is not None:
+            overrides['walltime'] = walltime
+        if queue is not None:
+            overrides['queue'] = queue
+        if project is not None:
+            overrides['project'] = project
 
-    lammps_dirs = sorted(
-        d.parent for d in sim_path.rglob('system.lmp') if d.parent.is_dir()
-    )
-    if not lammps_dirs:
-        lammps_dirs = sorted(
-            d.parent for d in sim_path.rglob('system.in') if d.parent.is_dir()
+        # Call smart submit helper
+        processes = smart_submit(
+            simulation_dir=sim_path,
+            code_label=code,
+            use_array=use_array,
+            scripts=scripts,
+            dry_run=dry_run,
+            **overrides,
         )
 
-    if not lammps_dirs:
-        click.echo("❌ No LAMMPS simulation directories found", err=True)
-        raise click.Abort()
+        if not dry_run and processes:
+            click.echo(f"\n✅ Successfully submitted {len(processes)} job(s)")
 
-    click.echo(f"📋 Found {len(lammps_dirs)} simulation(s)")
-
-    if dry_run:
-        for d in lammps_dirs:
-            click.echo(f"   [dry-run] {d}")
-        return
-
-    try:
-        params = None
-        if scripts:
-            script_list = [s.strip() for s in scripts.split(',') if s.strip()]
-            if script_list:
-                params = {'lammps_scripts': script_list}
-
-        options = _build_aiida_submit_options(
-            machines=machines,
-            mpiprocs=mpiprocs,
-            walltime=walltime,
-            queue=queue,
-            project=project,
-            mem=mem,
-            scheduler=scheduler,
-            prepend_text=prepend_text,
-        )
-
-        if use_array:
-            node = submit_array(
-                sim_path,
-                lammps_dirs,
-                code_node,
-                options=options,
-                parameters=params,
-                scheduler=scheduler,
-            )
-            click.echo(f"✅ Submitted array CalcJob PK={node.pk}")
-        else:
-            nodes = submit_batch(lammps_dirs, code_node, options=options, parameters=params)
-            click.echo(f"✅ Submitted {len(nodes)} CalcJob(s)")
-            for node in nodes:
-                click.echo(f"   PK={node.pk}  {node.label or ''}")
     except Exception as exc:  # pylint: disable=broad-except
         logger.exception("AiiDA submit failed")
         _raise_abort(f"❌ Submission failed: {exc}", exc)
+
+# =============================================================================
+# POSTPROCESSING COMMANDS
+# =============================================================================
+
+@cli.group('postprocess')
+def postprocess_group():
+    """Read, analyse and plot simulation results."""
+
+
+@postprocess_group.command('read')
+@click.argument('results_dir', type=click.Path(exists=True))
+@click.option('--export', 'do_export', is_flag=True,
+              help='Export full time-series data to JSON.')
+def postprocess_read(results_dir: str, do_export: bool):
+    """Read and process simulation result data."""
+    from src.postprocessing import DataReader  # noqa: PLC0415
+
+    reader = DataReader(results_dir=results_dir)
+    reader.export_issue_reports()
+    if do_export:
+        reader.export_full_data_to_json()
+    click.echo("Postprocessing complete.")
+
+
+@postprocess_group.command('plot')
+@click.argument('plot_config', type=click.Path(exists=True))
+@click.option('--output-dir', '-o', default='plots',
+              help='Output directory for plots.')
+@click.option('--settings', type=click.Path(exists=True),
+              help='Plot settings JSON file.')
+def postprocess_plot(plot_config: str, output_dir: str,
+                     settings: Optional[str]):
+    """Generate plots from processed simulation data."""
+    import json  # noqa: PLC0415
+    from src.postprocessing import Plotter  # noqa: PLC0415
+
+    with open(plot_config, 'r') as f:
+        config = json.load(f)
+
+    plot_settings = None
+    if settings:
+        with open(settings, 'r') as f:
+            plot_settings = json.load(f)
+
+    data_dirs = config.get('data_dirs', [])
+    labels = config.get('labels', [])
+    plots = config.get('plots', [])
+
+    if not data_dirs or not labels or not plots:
+        raise click.Abort(
+            "'data_dirs', 'labels', and 'plots' must be defined in config."
+        )
+
+    if len(data_dirs) != len(labels):
+        raise click.Abort(
+            "Number of 'data_dirs' must match number of 'labels'."
+        )
+
+    plotter = Plotter(data_dirs, labels, output_dir, plot_settings)
+    for plot_cfg in plots:
+        plotter.generate_plot(plot_cfg)
+    click.echo("All plots generated.")
+
 
 # =============================================================================
 # MAIN ENTRY POINT

@@ -1,4 +1,5 @@
 # LAMMPS Input Script for Sheet-vs-Sheet Sliding
+# {{ n_layers }}-layer model, constraint_mode: {{ constraint_mode }}
 
 {% if scan_speed_config is iterable and scan_speed_config is not string %}
 variable        speed index {{ scan_speed_config | join(' ') }}
@@ -28,7 +29,7 @@ variable        a equal {{ scan_angle_config }}
 
 clear
 units           metal
-atom_style      molecular
+atom_style      {{ atom_style }}
 boundary        p p p
 
 neighbor        {{ neighbor_list }} bin
@@ -37,15 +38,35 @@ neighbor        {{ neighbor_list }} bin
 comm_style      tiled
 
 region          box block {{ xlo }} {{ xhi }} {{ ylo }} {{ yhi }} -15.0 {{zhi + 15}} units box
-create_box      {{ num_atom_types }} box bond/types 1 extra/bond/per/atom 100
+{% if constraint_mode == 'atom_bonds' %}
+create_box      {{ num_atom_types }} box bond/types {{ n_bond_types }} extra/bond/per/atom 100
 
 read_data       {{ data_file }} extra/bond/per/atom 100 add append group bot
+{% else %}
+create_box      {{ num_atom_types }} box
+
+read_data       {{ data_file }} add append group bot
+{% endif %}
 
 include         {{ potential_file }}
 
+{% if pot_type == 'reaxff' %}
+fix             qeq all qeq/reaxff 1 0.0 10.0 1.0e-6 reaxff
+{% elif pot_type == 'reax/c' %}
+fix             qeq all qeq/reax 1 0.0 10.0 1.0e-6 reax/c
+{% endif %}
+
+{% if constraint_mode == 'atom_bonds' %}
+# Harmonic bonds between top two layers
 bond_style      harmonic
 bond_coeff      1 {{ bond_spring_ev }} {{ lat_c }}
-create_bonds    many layer_3 layer_4 1 {{ bond_min }} {{ bond_max }}
+create_bonds    many layer_{{ n_layers - 1 }} layer_{{ n_layers }} 1 {{ bond_min }} {{ bond_max }}
+{% if n_layers > 3 %}
+# Harmonic bonds between bottom two layers
+bond_coeff      2 {{ bond_spring_ev }} {{ lat_c }}
+create_bonds    many layer_1 layer_2 2 {{ bond_min }} {{ bond_max }}
+{% endif %}
+{% endif %}
 
 {% if dump_enabled %}
 dump            sys all atom {{ dump_freq }} {{ dump_file_pattern }}
@@ -56,24 +77,37 @@ balance         1.0 rcb
 min_style       {{ min_style }}
 {{ minimization_command }}
 
-group           center union layer_2 layer_3
+# Thermostat on middle layers (2 through {{ n_layers - 1 }})
+group           center union {% for i in range(2, n_layers) %}layer_{{ i }}{{ ' ' if not loop.last }}{% endfor %}
+
 velocity        center create {{ temp }} {{ range(1, 999999) | random }}
+{% if thermostat_type == 'nose-hoover' %}
+fix             nvt_center center nvt temp {{ temp }} {{ temp }} $(100.0*dt)
+{% else %}
 fix             lang center langevin {{ temp }} {{ temp }} $(100.0*dt) {{ range(1, 999999) | random }} zero yes
 fix             nve_center center nve
+{% endif %}
 
 timestep        {{ timestep }}
 thermo          {{ thermo }}
 
-fix             fstage_top layer_4 rigid/nve single force * on on on torque * off off off
+# Top layer (layer {{ n_layers }}): driven
+{% if drive_method == 'fix_move' %}
+fix             fstage_top layer_{{ n_layers }} rigid/nve single force * off off on torque * off off off
+{% else %}
+fix             fstage_top layer_{{ n_layers }} rigid/nve single force * on on on torque * off off off
+{% endif %}
+# Bottom layer (layer 1): fixed
 fix             fsbot layer_1 setforce 0.0 0.0 0.0
 velocity        layer_1 set 0.0 0.0 0.0 units box
 
-compute         COM_top layer_4 com
+# COM computes for key layers
+compute         COM_top layer_{{ n_layers }} com
 variable        comx_top equal c_COM_top[1]
 variable        comy_top equal c_COM_top[2]
 variable        comz_top equal c_COM_top[3]
 
-compute         COM_ctop layer_3 com
+compute         COM_ctop layer_{{ n_layers - 1 }} com
 variable        comx_ctop equal c_COM_ctop[1]
 variable        comy_ctop equal c_COM_ctop[2]
 variable        comz_ctop equal c_COM_ctop[3]
@@ -91,10 +125,10 @@ variable        comz_bot equal c_COM_bot[3]
 # Apply Uniform Pressure
 # 1 eV/Å^3 = 160.2176621 GPa
 variable        A equal ({{ xhi }}-{{ xlo }})*({{ yhi }}-{{ ylo }})
-variable        p equal v_pressure/160.2176565 
-variable        f equal -v_p*v_A/(count(layer_4))
+variable        p equal v_pressure/160.2176565
+variable        f equal -v_p*v_A/(count(layer_{{ n_layers }}))
 
-fix             force layer_4 aveforce 0.0 0.0 $f
+fix             force layer_{{ n_layers }} aveforce 0.0 0.0 $f
 
 variable        fx equal f_force[1]*1.602176565
 variable        fy equal f_force[2]*1.602176565
@@ -103,40 +137,54 @@ variable        sx equal f_fsbot[1]*1.602176565
 variable        sy equal f_fsbot[2]*1.602176565
 variable        sz equal f_fsbot[3]*1.602176565
 
-compute         frict layer_3 group/group layer_2
+{% if has_internal_lj %}
+# Many-body potential; compute group/group not supported; use bottom layer reaction forces instead
+variable        xfrict equal v_sx
+variable        yfrict equal v_sy
+{% else %}
+compute         frict layer_{{ n_layers - 1 }} group/group layer_{{ n_layers - 2 }}
 variable        xfrict equal c_frict[1]
 variable        yfrict equal c_frict[2]
+{% endif %}
 
-run             10000
+run             20000
 
+{% if constraint_mode == 'atom_bonds' %}
+# Recalibrate top bond equilibrium distance after minimization
 thermo_style    custom v_comz_top v_comz_ctop
 run             0
 thermo_style    multi
 
-variable        r0_new equal v_comz_top-v_comz_ctop
-bond_coeff      1 {{ bond_spring_ev }} ${r0_new}
+variable        r0_top equal v_comz_top-v_comz_ctop
+bond_coeff      1 {{ bond_spring_ev }} ${r0_top}
+{% if n_layers > 3 %}
+# Recalibrate bottom bond equilibrium distance after minimization
+variable        r0_bot equal v_comz_cbot-v_comz_bot
+bond_coeff      2 {{ bond_spring_ev }} ${r0_bot}
+{% endif %}
+{% elif constraint_mode == 'com_spring' %}
+# COM spring tethering top two layers
+fix             com_spring layer_{{ n_layers }} spring couple layer_{{ n_layers - 1 }} {{ bond_spring_ev }} 0.0 0.0 NULL 0.0
+{% endif %}
 
-velocity        layer_4 set 0.0 0.0 0.0 units box
+velocity        layer_{{ n_layers }} set 0.0 0.0 0.0 units box
 
 variable        speed_x equal cos(v_a*PI/180)
 variable        speed_y equal sin(v_a*PI/180)
 
 {% if drive_method == 'smd' %}
-fix             spr layer_4 smd cvel {{ driving_spring_ev }} ${speed/100} tether $(v_speed_x) $(v_speed_y) NULL 0.0
+fix             spr layer_{{ n_layers }} smd cvel {{ driving_spring_ev }} ${speed/100} tether $(v_speed_x) $(v_speed_y) NULL 0.0
 
 {% elif drive_method == 'fix_move' %}
-velocity        layer_4 set $(v_speed_x*${speed}/100) $(v_speed_y*${speed}/100) 0.0
+velocity        layer_{{ n_layers }} set 0.0 0.0 0.0 units box
+velocity        layer_{{ n_layers }} set $(v_speed_x*v_speed/100) $(v_speed_y*v_speed/100) 0.0
 
 {% elif drive_method == 'virtual_atom' %}
-variable        virtual_x equal $(v_comx_top)
-variable        virtual_y equal $(v_comy_top)
-variable        virtual_z equal $(v_comz_top)+10
-
-create_atoms    {{ num_atom_types}} single $(v_virtual_x) $(v_virtual_y) $(v_virtual_z) units box
+create_atoms    {{ num_atom_types }} single $(xcm(layer_{{ n_layers }},x)) $(xcm(layer_{{ n_layers }},y)) $(xcm(layer_{{ n_layers }},z)+10) units box
 group           virtual type {{num_atom_types}}
 velocity        virtual set 0.0 0.0 0.0
 
-fix             spr layer_4 spring couple virtual {{ driving_spring_ev }} 0.0 0.0 NULL 0
+fix             spr layer_{{ n_layers }} spring couple virtual {{ driving_spring_ev }} 0.0 0.0 NULL 0
 fix             move_virtual virtual move linear $(v_speed*v_speed_x/100) $(v_speed*v_speed_y/100) 0.0
 {% endif %}
 

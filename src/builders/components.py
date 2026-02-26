@@ -30,7 +30,8 @@ from src.core.config import GlobalSettings, SheetConfig, SubstrateConfig, TipCon
 from src.core.potential_manager import PotentialManager
 from src.core.utils import (
     cifread, count_atomtypes, get_material_path, get_model_dimensions,
-    renumber_atom_types, check_potential_cif_compatibility, get_num_atom_types
+    renumber_atom_types, check_potential_cif_compatibility, get_num_atom_types,
+    atomic2charge
 )
 from src.interfaces.atomsk import AtomskWrapper
 from src.interfaces.jinja import PackageLoader
@@ -333,7 +334,7 @@ def _create_base_slab(
         atomsk: AtomskWrapper instance.
     """
     if config.amorph == 'a':
-        pot_path = get_material_path(config.pot_path, config.pot_type)
+        pot_path = get_material_path(config.pot_path)
         amor_path = make_amorphous(
             config.mat, cif_path,
             target_x=target_x, target_y=target_y, target_z=target_z,
@@ -424,6 +425,8 @@ def stack_multilayer_sheet(
     layer_shifts_x = [shift[0] for shift in per_layer_shifts]
     layer_shifts_y = [shift[1] for shift in per_layer_shifts]
 
+    atom_style = 'charge' if config.pot_type in ('reaxff', 'reax/c') else 'atomic'
+
     context = {
         'box_xlo': box_dims['xlo'],
         'box_xhi': box_dims['xhi'],
@@ -431,6 +434,7 @@ def stack_multilayer_sheet(
         'box_yhi': box_dims['yhi'],
         'box_zhi': max_z,
         'total_types': total_types,
+        'atom_style': atom_style,
         'base_layer_path': base_layer_path,
         'n_layers': layers_for_setup,
         'layer_shifts': layer_shifts,
@@ -439,6 +443,7 @@ def stack_multilayer_sheet(
         'types_per_layer': types_per_layer,
         'pot_counts': pot_counts,
         'pot_file': pot_file,
+        'pot_type': config.pot_type.lower(),
         'calculate_lat_c': calculate_lat_c,
         'min_style': settings.simulation.min_style if calculate_lat_c else None,
         'minimization_command': settings.simulation.minimization_command if calculate_lat_c else None,
@@ -508,7 +513,7 @@ def build_tip(
     Returns:
         Tuple of (tip_path, actual_radius).
     """
-    cif_path = get_material_path(config.cif_path, 'cif')
+    cif_path = get_material_path(config.cif_path)
 
     base_lmp = Path(tempfile.gettempdir()) / f"{config.mat}_{uuid.uuid4().hex[:8]}_base.lmp"
     final_lmp = build_dir / "tip.lmp"
@@ -571,7 +576,7 @@ def build_substrate(
         Path to substrate file.
     """
 
-    cif_path = get_material_path(config.cif_path, 'cif')
+    cif_path = get_material_path(config.cif_path)
     base_lmp = Path(tempfile.gettempdir()) / f"{config.mat}_{uuid.uuid4().hex[:8]}_base.lmp"
     final_lmp = build_dir / "sub.lmp"
     target_x = box_dims['xhi'] - box_dims['xlo']
@@ -704,8 +709,8 @@ def build_monolayer(
     Returns:
         Tuple of (path, box_dims, pot_counts, total_types, supercell_dims).
     """
-    cif_path = get_material_path(config.cif_path, 'cif')
-    pot_path = get_material_path(config.pot_path, config.pot_type)
+    cif_path = get_material_path(config.cif_path)
+    pot_path = get_material_path(config.pot_path)
     base_path = Path(tempfile.gettempdir()) / f"{config.mat}_1_{uuid.uuid4().hex[:8]}.lmp"
 
     cif_data = cifread(cif_path)
@@ -768,6 +773,8 @@ def build_monolayer(
 
     if config.pot_type in ['tersoff', 'sw', 'rebo', 'airebo']:
         atomsk.charge2atom(base_path)
+    elif config.pot_type in ['reaxff', 'reax/c']:
+        atomic2charge(base_path)
 
     return base_path, dims, pot_counts, total_pot_types, supercell_dims
 

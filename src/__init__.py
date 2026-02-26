@@ -19,6 +19,14 @@ from src.core.config import (
     parse_config,
 )
 
+# Optional AiiDA imports (only available if AiiDA is installed)
+try:
+    from src.aiida.submit import run_with_aiida
+    _AIIDA_AVAILABLE = True
+except ImportError:
+    _AIIDA_AVAILABLE = False
+    run_with_aiida = None  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 
@@ -78,4 +86,8 @@ __all__ = [
     "SheetOnSheetSimulationConfig",
     "load_settings",
     "parse_config",
+    "run_simulations",
 ]
+
+if _AIIDA_AVAILABLE:
+    __all__.append("run_with_aiida")

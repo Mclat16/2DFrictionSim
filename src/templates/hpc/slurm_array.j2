@@ -43,24 +43,14 @@ if [ -z "$SCRIPT_PATH" ]; then
 fi
 
 {% if use_tmpdir %}
-SCRATCH={{ scratch_dir }}/friction2d_${SLURM_JOB_ID}
+SIM_ROOT=$(basename "{{ base_dir }}")
+SCRATCH={{ scratch_dir }}/${SIM_ROOT}
 mkdir -p $SCRATCH/${SIM_PATH}
 rsync -av --exclude='*.lammpstrj' {{ base_dir }}/${SIM_PATH}/ $SCRATCH/${SIM_PATH}/
 cd $SCRATCH
 {% else %}
 cd {{ base_dir }}
 {% endif %}
-
-if [[ "$SCRIPT_PATH" == *slide*.in ]]; then
-    SYSTEM_SCRIPT=$(find "${SIM_PATH}/lammps" -maxdepth 1 -type f -name '*system*.in' | sort | head -n1)
-    if [ -n "$SYSTEM_SCRIPT" ]; then
-        {{ mpi_command }} lmp {{ lmp_flags }} -in ${SYSTEM_SCRIPT}
-        if [ $? -ne 0 ]; then
-            echo "Error: LAMMPS failed on ${SYSTEM_SCRIPT}"
-            exit 1
-        fi
-    fi
-fi
 
 {{ mpi_command }} lmp {{ lmp_flags }} -in ${SCRIPT_PATH}
 if [ $? -ne 0 ]; then
@@ -69,7 +59,7 @@ if [ $? -ne 0 ]; then
 fi
 
 {% if use_tmpdir %}
-cp -r ${SIM_PATH}/results ${SIM_PATH}/visuals {{ base_dir }}/${SIM_PATH}/
+cp -r ${SIM_PATH}/results ${SIM_PATH}/visuals ${SIM_PATH}/data {{ base_dir }}/${SIM_PATH}/
 {% endif %}
 
 echo "Simulation completed successfully: ${SIM_PATH}"

@@ -124,32 +124,6 @@ def collect_hpc_simulation_paths(
     return sorted(set(simulation_paths))
 
 
-def _resolve_hpc_lammps_scripts(
-    simulation_root: Path,
-    simulation_paths: List[str],
-    configured_scripts: List[str],
-) -> List[str]:
-    """Resolve configured scripts into concrete script names for HPC templates.
-
-    In split-script mode, ``slide.in`` is replaced by discovered ``slide_*.in``
-    names (must be consistent across simulation directories).
-    """
-    if 'slide.in' not in configured_scripts:
-        return configured_scripts
-
-    for sim_rel in simulation_paths:
-        lammps_dir = simulation_root / sim_rel / 'lammps'
-        if not lammps_dir.exists():
-            continue
-
-        if any(lammps_dir.glob('slide_*.in')):
-            return [
-                script for script in configured_scripts if script != 'slide.in'
-            ] + ['__MANIFEST_SCRIPT__']
-
-    return configured_scripts
-
-
 def _build_hpc_manifest_entries(
     simulation_root: Path,
     simulation_paths: List[str],
@@ -205,9 +179,6 @@ def generate_hpc_scripts_for_root(simulation_root: Path, settings) -> None:
         logger.warning("No simulations found for HPC script generation.")
         return
 
-    if not hpc_config.log_dir:
-        raise ValueError("HPC log_dir is required to generate job scripts.")
-
     manifest_entries, resolved_scripts = _build_hpc_manifest_entries(
         simulation_root,
         simulation_paths,
@@ -215,21 +186,12 @@ def generate_hpc_scripts_for_root(simulation_root: Path, settings) -> None:
     )
     hpc_config.lammps_scripts = resolved_scripts
 
-    if hpc_config.hpc_home:
-        hpc_home = hpc_config.hpc_home.rstrip('/')
-        if ':' in hpc_home:
-            _, hpc_home_path = hpc_home.split(':', 1)
-        else:
-            hpc_home_path = hpc_home
-        per_sim_log_dir = Path(f"{hpc_home_path}/{simulation_root.name}/logs")
-    else:
-        log_base = Path(hpc_config.log_dir).parent
-        per_sim_log_dir = log_base / f"logs_{simulation_root.name}"
-
     hpc_dir = simulation_root / 'hpc'
     hpc_dir.mkdir(parents=True, exist_ok=True)
 
-    if hpc_config.scheduler_type == 'pbs':
+    if hpc_config.hpc_home:
+        base_dir = hpc_config.hpc_home.rstrip('/') + '/' + simulation_root.name
+    elif hpc_config.scheduler_type == 'pbs':
         base_dir = '$PBS_O_WORKDIR'
     else:
         base_dir = '$SLURM_SUBMIT_DIR'
@@ -238,8 +200,7 @@ def generate_hpc_scripts_for_root(simulation_root: Path, settings) -> None:
         simulation_paths=manifest_entries,
         output_dir=hpc_dir,
         scheduler=hpc_config.scheduler_type,
-        base_dir=base_dir,
-        log_dir=str(per_sim_log_dir)
+        base_dir=base_dir
     )
 
 
@@ -267,12 +228,14 @@ def run_simulations(
         defaults.aiida.enabled = True
         defaults.aiida.create_provenance = True
 
+    # pylint: disable=no-member
     if model == 'sheetonsheet':
         if defaults.hpc.lammps_scripts == ['system.in', 'slide.in']:
             defaults.hpc.lammps_scripts = ['slide.in']
     elif model == 'afm':
         if defaults.hpc.lammps_scripts == ['slide.in']:
             defaults.hpc.lammps_scripts = ['system.in', 'slide.in']
+    # pylint: enable=no-member
 
     if ensure_hpc_settings is not None:
         ensure_hpc_settings(defaults.hpc)

@@ -230,12 +230,10 @@ class FrictionProvenanceData(Data):
         node = cls()
         node.simulation_type = simulation_type
 
-        # Manifest
         manifest_path = provenance_dir / 'manifest.json'
         component_map = cls._load_manifest(manifest_path)
         node.base.attributes.set('file_manifest', component_map)
 
-        # Config files (*.ini, *.json — skip manifest itself)
         for pattern in ('*.ini', '*.json'):
             for config_file in provenance_dir.glob(pattern):
                 if config_file.name == 'manifest.json':
@@ -243,12 +241,10 @@ class FrictionProvenanceData(Data):
                 node.base.attributes.set('config_filename', config_file.name)
                 node.add_file(config_file, 'config')
 
-        # settings.yaml
         settings_path = provenance_dir / 'settings.yaml'
         if settings_path.exists():
             node.add_file(settings_path, 'config')
 
-        # Materials list
         for list_file in provenance_dir.glob('*.txt'):
             if 'material' in list_file.name.lower():
                 materials = [
@@ -260,13 +256,11 @@ class FrictionProvenanceData(Data):
                 node.add_file(list_file, 'config')
                 break
 
-        # CIF files
         cif_dir = provenance_dir / 'cif'
         if cif_dir.exists():
             for cif_file in cif_dir.glob('*.cif'):
                 node.add_file(cif_file, 'cif')
 
-        # Potential files
         pot_dir = provenance_dir / 'potentials'
         if pot_dir.exists():
             for pot_file in pot_dir.iterdir():

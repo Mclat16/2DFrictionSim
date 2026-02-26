@@ -43,8 +43,9 @@ class SimulationSettings(BaseModel):
     minimization_command: str = 'minimize 1e-4 1e-8 1000000 1000000'
     neighbor_list: float = 0.3
     neigh_modify_command: str = 'neigh_modify every 1 delay 0 check yes'
-    slide_run_steps: int = 200000
-    drive_method: Literal['smd', 'fix_move', 'virtual_atom'] = 'virtual_atom'
+    slide_run_steps: int =500000
+    drive_method: Literal['smd', 'fix_move', 'virtual_atom'] = 'fix_move'
+    constraint_mode: Literal['atom_bonds', 'com_spring', 'none'] = 'none'
 
 class QuenchSettings(BaseModel):
     """Quenching parameters for amorphous material generation."""
@@ -70,8 +71,16 @@ class OutputSettings(BaseModel):
 
 class PotentialSettings(BaseModel):
     """Settings for interatomic potentials."""
-    lj_cutoff: float = Field(default=8.0, alias='LJ_cutoff')
+    lj_cutoff: float = Field(default=11.0, alias='LJ_cutoff')
     lj_type: str = Field(default='LJ_base', alias='LJ_type')
+    reaxff_safezone: float = Field(
+        default=1.2,
+        description="Memory safety multiplier for ReaxFF neighbor lists"
+    )
+    reaxff_mincap: int = Field(
+        default=50,
+        description="Minimum array capacity for ReaxFF internals"
+    )
     model_config = {'validate_by_name': True}
 
 class HPCSettings(BaseModel):
@@ -80,24 +89,22 @@ class HPCSettings(BaseModel):
     queue: Optional[str] = None
     partition: Optional[str] = None
     account: str = ''
+    hpc_host: Optional[str] = None
     hpc_home: Optional[str] = None
-    log_dir: Optional[str] = "/rds/general/user/mv923/home/logs_system_1"
     scratch_dir: Optional[str] = "$TMPDIR"
     num_nodes: int = 1
     num_cpus: int = 32
     memory_gb: int = 62
     walltime_hours: int = 20
     max_array_size: int = 300
-    modules: List[str] = Field(default_factory=lambda: [
-        'tools/prod',
-        'LAMMPS/29Aug2024-foss-2023b-kokkos'
-    ])
+    modules: Optional[List[str]] = Field(default_factory=lambda: None)
     mpi_command: str = "mpirun"
     use_tmpdir: bool = True
     lammps_scripts: List[str] = Field(default_factory=lambda: [
         'system.in',
         'slide.in'
     ])
+
 
 class AiidaSettings(BaseModel):
     """AiiDA-specific workflow settings."""
@@ -109,6 +116,16 @@ class AiidaSettings(BaseModel):
     auto_import_results: bool = False
     hpc_mode: Literal['local', 'remote', 'offline'] = 'offline'
 
+    # AiiDA remote computer configuration (optional, only for 'aiida setup')
+    computer_label: Optional[str] = 'localhost'
+    transport: Literal['local', 'ssh'] = 'local'
+    hostname: Optional[str] = None
+    workdir: Optional[str] = None
+    username: Optional[str] = None
+    ssh_port: int = 22
+    key_filename: Optional[str] = None
+
+
 class GlobalSettings(BaseModel):
     """Represents the full structure of settings.yaml with hardcoded defaults."""
     geometry: GeometrySettings = Field(default_factory=GeometrySettings)
@@ -118,7 +135,7 @@ class GlobalSettings(BaseModel):
     output: OutputSettings = Field(default_factory=OutputSettings)
     potential: PotentialSettings = Field(default_factory=PotentialSettings)
     hpc: HPCSettings = Field(default_factory=HPCSettings)
-    aiida: AiidaSettings = Field(default_factory=AiidaSettings)
+    aiida: AiidaSettings = Field(default_factory=lambda: AiidaSettings())  # pylint: disable=unnecessary-lambda
 
 # --- User Input Settings (From .ini files) ---
 
@@ -154,7 +171,7 @@ class ComponentConfig(BaseModel):
         if info.field_name == 'pot_path':
             resolved = get_potential_path(v)
         else:
-            resolved = get_material_path(v, 'cif')
+            resolved = get_material_path(v)
 
         return str(resolved) if resolved.exists() else v
 
@@ -190,11 +207,11 @@ class SheetConfig(ComponentConfig):
 
 class GeneralConfig(BaseModel):
     """General simulation parameters."""
-    temp: float
+    temp: float = 300.0
     force: Optional[Union[float, List[float]]] = None
     pressure: Optional[Union[float, List[float]]] = None
     scan_angle: Optional[Union[float, List[float]]] = 0.0
-    scan_speed: Optional[Union[float, List[float]]] = None
+    scan_speed: Optional[Union[float, List[float]]] = 2.0
     outer_loop: Optional[Literal['pressure', 'scan_speed']] = Field(
         None,
         description=(
@@ -202,7 +219,7 @@ class GeneralConfig(BaseModel):
             "If omitted, legacy single-script behavior is used."
         )
     )
-    bond_spring: Optional[float] = Field(5.0, description="Spring constant for harmonically bonded sheets")
+    bond_spring: Optional[float] = Field(80.0, description="Spring constant for harmonically bonded sheets")
     driving_spring: Optional[float] = Field(50, description="Driving spring constant")
 
 
@@ -223,7 +240,11 @@ class SheetOnSheetSimulationConfig(BaseModel):
 # --- Helper Functions ---
 
 def _ensure_default_settings_files() -> None:
-    """Create settings files in src/data/settings if they are missing."""
+    """Create settings.yaml in src/data/settings if it is missing.
+
+    Note: hpc.yaml is no longer auto-created. It's only needed for AiiDA
+    remote computer setup and should be created manually when needed.
+    """
     settings_dir = Path(__file__).resolve().parents[1] / 'data' / 'settings'
     settings_dir.mkdir(parents=True, exist_ok=True)
 
@@ -232,24 +253,6 @@ def _ensure_default_settings_files() -> None:
         defaults = GlobalSettings()
         settings_path.write_text(
             yaml.safe_dump(defaults.model_dump(), sort_keys=False),
-            encoding='utf-8'
-        )
-
-    hpc_path = settings_dir / 'hpc.yaml'
-    if not hpc_path.exists():
-        hpc_defaults = GlobalSettings().hpc
-        hpc_payload = {
-            'label': 'hpc',
-            'scheduler': hpc_defaults.scheduler_type,
-            'transport': 'ssh',
-            'hostname': '',
-            'workdir': '',
-            'username': '',
-            'ssh_port': 22,
-            'key_filename': ''
-        }
-        hpc_path.write_text(
-            yaml.safe_dump(hpc_payload, sort_keys=False),
             encoding='utf-8'
         )
 

@@ -3,7 +3,7 @@
 
 clear
 units metal
-atom_style atomic
+atom_style {{ atom_style }}
 boundary p p p
 
 region box block {{ box_xlo }} {{ box_xhi }} {{ box_ylo }} {{ box_yhi }} -10 {{ box_zhi }}
@@ -36,6 +36,11 @@ group 2Dtype delete
 {% endfor %}
 
 include {{ pot_file }}
+{% if pot_type == 'reaxff' %}
+fix             qeq all qeq/reaxff 1 0.0 10.0 1.0e-6 reaxff
+{% elif pot_type == 'reax/c' %}
+fix             qeq all qeq/reax 1 0.0 10.0 1.0e-6 reax/c
+{% endif %}
 run 0
 
 {% if calculate_lat_c %}

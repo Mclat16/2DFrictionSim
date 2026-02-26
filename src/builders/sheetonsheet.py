@@ -1,15 +1,18 @@
 """Sheet-on-Sheet Simulation Builder.
 
 This module orchestrates the setup of a friction simulation between two
-2D material sheets. The standard model is a 4-layer stack:
+2D material sheets. The model is an N-layer stack (minimum 3):
     - Layer 1: Fixed (bottom)
-    - Layer 2-3: Mobile with Langevin thermostat (friction interface)
-    - Layer 4: Rigid, driven by virtual atom (top)
+    - Layers 2 to N-1: Mobile with Langevin thermostat (friction interface)
+    - Layer N: Rigid, driven by virtual atom (top)
 
-Interlayer interactions:
-    - Adjacent layers (1-2, 2-3, 3-4): Real LJ interactions
-    - Non-adjacent layers (1-3, 1-4, 2-4): Ghost interactions (prevent interpenetration)
-"""
+Constraint modes control interlayer bonding and ghost interactions:
+    - atom_bonds: Harmonic bonds between top 2 and (if N>3) bottom 2 layers,
+        ghost LJ for non-adjacent layers.
+    - com_spring: COM spring between top 2 layers, ghost LJ for non-adjacent
+        layers, no constraints on bottom layers.
+    - none: No bonds or springs, real LJ for all layer pairs.
+""" 
 
 import logging
 import re
@@ -18,26 +21,26 @@ from typing import Dict, Optional, List, Union
 
 from src.core.simulation_base import SimulationBase
 from src.core.config import SheetOnSheetSimulationConfig
-from src.core.potential_manager import PotentialManager
+from src.core.potential_manager import PotentialManager, POTENTIALS_WITH_INTERNAL_LJ
 from src.core.utils import atomic2molecular
 from src.builders import components
 
 logger = logging.getLogger(__name__)
 
-N_LAYERS = 4
+MIN_LAYERS = 3
+
 
 class SheetOnSheetSimulation(SimulationBase):
     """Builder for Sheet-on-Sheet friction simulations.
-    
-    Creates a 4-layer stack of the same 2D material:
+
+    Creates an N-layer stack of the same 2D material:
         - Layer 1: Fixed bottom layer
-        - Layer 2: Mobile (Langevin thermostat)
-        - Layer 3: Mobile (Langevin thermostat)  
-        - Layer 4: Driven top layer (rigid body)
+        - Layers 2 to N-1: Mobile (Langevin thermostat)
+        - Layer N: Driven top layer (rigid body)
     """
 
     def __init__(self, config: SheetOnSheetSimulationConfig, output_dir: str,
-                    config_path: Optional[str] = None):
+                 config_path: Optional[str] = None):
         super().__init__(config, output_dir, config_path=config_path)
         self.config: SheetOnSheetSimulationConfig = config
         self.structure_paths: Dict[str, Path] = {}
@@ -46,6 +49,11 @@ class SheetOnSheetSimulation(SimulationBase):
         self.pm: Optional[PotentialManager] = None
         self.lat_c: Optional[float] = None
         self.sheet_dims: Optional[Dict] = None
+
+    @property
+    def n_layers(self) -> int:
+        """Number of layers derived from sheet configuration."""
+        return max(self.config.sheet.layers)
 
     @staticmethod
     def _to_list(value: Optional[Union[float, List[float]]]) -> List[float]:
@@ -64,8 +72,15 @@ class SheetOnSheetSimulation(SimulationBase):
         return re.sub(r'[^A-Za-z0-9_]+', '_', token)
 
     def build(self) -> None:
-        """Constructs the 4-layer sheet stack."""
-        logger.info("Starting Sheet-vs-Sheet Build (4-layer model)...")
+        """Constructs the N-layer sheet stack."""
+        n_layers = self.n_layers
+        if n_layers < MIN_LAYERS:
+            raise ValueError(
+                f"Sheet-on-sheet requires at least {MIN_LAYERS} layers, "
+                f"got {n_layers}"
+            )
+
+        logger.info("Starting Sheet-vs-Sheet Build (%d-layer model)...", n_layers)
         self._create_directories()
 
         build_dir = self.output_dir / "build"
@@ -73,20 +88,32 @@ class SheetOnSheetSimulation(SimulationBase):
 
         self._init_provenance()
 
-        logger.info("Building %d-layer sheet stack...", N_LAYERS)
+        constraint_mode = self.config.settings.simulation.constraint_mode
+        pot_type_lower = self.config.sheet.pot_type.lower()
+
+        if pot_type_lower in POTENTIALS_WITH_INTERNAL_LJ and constraint_mode != 'none':
+            raise ValueError(
+                f"Potential '{pot_type_lower}' has internal interlayer interactions "
+                f"and does not support external LJ. "
+                f"Set constraint_mode to 'none' in settings.yaml."
+            )
+
+        use_pair_bonding = constraint_mode == 'atom_bonds'
+
+        logger.info("Building %d-layer sheet stack...", n_layers)
         stacking_type = getattr(self.config.sheet, 'stack_type', 'AB')
         sheet_path, dims, lat_c = components.build_sheet(
             self.config.sheet, self.atomsk, build_dir,
             stack_if_multi=True, settings=self.config.settings,
-            n_layers_override=N_LAYERS, use_pair_bonding=True,
+            n_layers_override=n_layers, use_pair_bonding=use_pair_bonding,
             stacking_type=stacking_type
         )
         self.structure_paths['sheet'] = sheet_path
 
         self.pm = self._generate_potentials()
         assert lat_c is not None
-        for i in range(N_LAYERS):
-            self.z_positions[f'layer_{i+1}'] = i * lat_c
+        for i in range(n_layers):
+            self.z_positions[f'layer_{i + 1}'] = i * lat_c
 
         self.lat_c = lat_c
         self.sheet_dims = dims
@@ -117,55 +144,99 @@ class SheetOnSheetSimulation(SimulationBase):
         logger.info("Initialized provenance folder: %s", prov_dir)
 
     def _generate_potentials(self) -> PotentialManager:
-        """Configures potential file for 4-layer sheet-on-sheet simulation.
-        
+        """Configure potential file for the sheet-on-sheet simulation.
+
+        Interlayer LJ handling depends on constraint_mode and potential type:
+            - Potentials with internal LJ (ReaxFF, AIREBO, etc.): No explicit LJ.
+            - atom_bonds / com_spring: Ghost LJ for non-adjacent layers.
+            - none: Real LJ for all layer pairs.
+
         Returns:
             Configured PotentialManager instance.
         """
+        n_layers = self.n_layers
+        constraint_mode = self.config.settings.simulation.constraint_mode
+
         pm = PotentialManager(
             self.config.settings,
             potentials_dir=self.output_dir / "provenance" / "potentials",
-            potentials_prefix=str(self.relative_run_dir / "provenance" / "potentials")
+            potentials_prefix=str(
+                self.relative_run_dir / "provenance" / "potentials"
+            )
         )
 
-        pm.register_component('sheet', self.config.sheet, n_layers=N_LAYERS)
+        pm.register_component('sheet', self.config.sheet, n_layers=n_layers)
 
         if self.config.settings.simulation.drive_method == 'virtual_atom':
             pm.register_virtual_atom()
 
         pm.add_self_interaction('sheet')
 
-        pm.add_ghost_lj('sheet', max_real_distance=1)
+        has_internal_lj = not pm.is_sheet_lj(self.config.sheet.pot_type)
+        if has_internal_lj:
+            pass  # ReaxFF, AIREBO, etc. handle interlayer interactions internally
+        elif constraint_mode in ('atom_bonds', 'com_spring'):
+            pm.add_ghost_lj('sheet', max_real_distance=1)
+        else:
+            pm.add_interlayer_interaction('sheet')
 
         settings_path = self.output_dir / "lammps" / "system.in.settings"
         pm.write_file(settings_path)
 
-        for layer in range(N_LAYERS):
+        for layer in range(n_layers):
             layer_num = layer + 1
-            self.groups[f'layer_{layer_num}'] = pm.types.get_layer_group_string(
-                'sheet', layer
+            self.groups[f'layer_{layer_num}'] = (
+                pm.types.get_layer_group_string('sheet', layer)
             )
 
-        self.groups['center'] = ' '.join([self.groups[f'layer_{i}'] for i in range(2, N_LAYERS)])
+        self.groups['center'] = ' '.join(
+            [self.groups[f'layer_{i}'] for i in range(2, n_layers)]
+        )
         self.groups['all_types'] = pm.types.get_group_string('sheet')
 
         return pm
 
+    def _build_layer_groups(self) -> Dict[str, str]:
+        """Build a dict mapping 'layer_N_types' to group type strings."""
+        layer_groups = {}
+        for i in range(1, self.n_layers + 1):
+            layer_groups[f'layer_{i}_types'] = self.groups[f'layer_{i}']
+        return layer_groups
+
     def write_inputs(self) -> None:
-        """Generates LAMMPS scripts."""
+        """Generate LAMMPS scripts."""
         logger.info("Writing LAMMPS inputs...")
 
         assert self.pm is not None
         assert self.sheet_dims is not None
         assert self.lat_c is not None
 
+        n_layers = self.n_layers
         total_types = len(self.pm.types) if self.pm else 0
+        constraint_mode = self.config.settings.simulation.constraint_mode
+        pot_type = self.config.sheet.pot_type.lower()
 
         sim = self.config.settings.simulation
         out = self.config.settings.output
 
         rel_run_dir_str = str(self.relative_run_dir)
-        atomic2molecular(f"{self.output_dir}/build/{self.structure_paths['sheet'].name}")
+
+        if constraint_mode == 'atom_bonds':
+            n_bond_types = 2 if n_layers > MIN_LAYERS else 1
+        else:
+            n_bond_types = 0
+
+        # Auto-detect atom_style based on potential and constraint mode
+        if pot_type in ('reaxff', 'reax/c'):
+            atom_style = 'charge'
+        elif constraint_mode == 'atom_bonds':
+            atom_style = 'molecular'
+        else:
+            atom_style = 'atomic'
+
+        sheet_data_path = f"{self.output_dir}/build/{self.structure_paths['sheet'].name}"
+        if atom_style == 'molecular':
+            atomic2molecular(sheet_data_path)
 
         base_context = {
             'temp': self.config.general.temp,
@@ -175,22 +246,30 @@ class SheetOnSheetSimulation(SimulationBase):
             'ylo': self.sheet_dims.get('ylo', 0.0),
             'yhi': self.sheet_dims.get('yhi', 100.0),
             'zhi': self.sheet_dims.get('zhi', 15.0),
-            'data_file': f"{rel_run_dir_str}/build/{self.structure_paths['sheet'].name}",
-            'potential_file': f"{rel_run_dir_str}/lammps/system.in.settings",
+            'data_file': (
+                f"{rel_run_dir_str}/build/"
+                f"{self.structure_paths['sheet'].name}"
+            ),
+            'potential_file': (
+                f"{rel_run_dir_str}/lammps/system.in.settings"
+            ),
             'num_atom_types': total_types,
             'ngroups': total_types,
-            'layer_1_types': self.groups['layer_1'],
-            'layer_2_types': self.groups['layer_2'],
-            'layer_3_types': self.groups['layer_3'],
-            'layer_4_types': self.groups['layer_4'],
+            'n_layers': n_layers,
+            'constraint_mode': constraint_mode,
+            'n_bond_types': n_bond_types,
+            **self._build_layer_groups(),
             'center_types': self.groups['center'],
-            'n_layers': N_LAYERS,
             'lat_c': self.lat_c,
             'sheet_dims': self.sheet_dims,
-            'bond_spring_ev': ((self.config.general.bond_spring or 80.0) / 16.02176565  ),
+            'bond_spring_ev': (
+                (self.config.general.bond_spring or 80.0) / 16.02176565
+            ),
             'bond_min': self.lat_c - 0.15,
             'bond_max': self.lat_c + 0.15,
-            'driving_spring_ev': ((self.config.general.driving_spring or 50.0) / 16.02176565),
+            'driving_spring_ev': (
+                (self.config.general.driving_spring or 50.0) / 16.02176565
+            ),
             'timestep': sim.timestep,
             'thermo': sim.thermo,
             'neighbor_list': sim.neighbor_list,
@@ -201,12 +280,19 @@ class SheetOnSheetSimulation(SimulationBase):
             'results_freq': out.results_frequency,
             'dump_freq': out.dump_frequency.get('slide', 1000),
             'dump_enabled': out.dump.get('slide', False),
-            'results_file_pattern': (f"{rel_run_dir_str}/results/"
-                                    f"friction_p${{pressure}}_a${{a}}_s${{speed}}"),
-            'dump_file_pattern': (f"{rel_run_dir_str}/visuals/"
-                                    f"slide_p${{pressure}}_a${{a}}_s${{speed}}.lammpstrj"),
+            'results_file_pattern': (
+                f"{rel_run_dir_str}/results/"
+                f"friction_p${{pressure}}_a${{a}}_s${{speed}}"
+            ),
+            'dump_file_pattern': (
+                f"{rel_run_dir_str}/visuals/"
+                f"slide_p${{pressure}}_a${{a}}_s${{speed}}.lammpstrj"
+            ),
             'drive_method': sim.drive_method,
             'thermostat_type': self.config.settings.thermostat.type,
+            'atom_style': atom_style,
+            'pot_type': pot_type,
+            'has_internal_lj': not self.pm.is_sheet_lj(pot_type),
         }
 
         outer_loop = getattr(self.config.general, 'outer_loop', None)
@@ -226,27 +312,37 @@ class SheetOnSheetSimulation(SimulationBase):
 
         if outer_loop == 'pressure':
             outer_values = pressures or [0.0]
-            inner_speeds: Union[float, List[float]] = speeds if len(speeds) > 1 else (
-                speeds[0] if speeds else 0.0
+            inner_speeds: Union[float, List[float]] = (
+                speeds if len(speeds) > 1
+                else (speeds[0] if speeds else 0.0)
             )
             for pressure in outer_values:
                 context = dict(base_context)
                 context['pressures'] = pressure
                 context['scan_speed_config'] = inner_speeds
-                script_name = f"slide_p{self._format_loop_value(float(pressure))}gpa.in"
-                script = self.render_template("sheetonsheet/slide.lmp", context)
+                script_name = (
+                    f"slide_p{self._format_loop_value(float(pressure))}gpa.in"
+                )
+                script = self.render_template(
+                    "sheetonsheet/slide.lmp", context
+                )
                 self.write_file(f"lammps/{script_name}", script)
         else:
             outer_values = speeds or [0.0]
-            inner_pressures: Union[float, List[float]] = pressures if len(pressures) > 1 else (
-                pressures[0] if pressures else 0.0
+            inner_pressures: Union[float, List[float]] = (
+                pressures if len(pressures) > 1
+                else (pressures[0] if pressures else 0.0)
             )
             for speed in outer_values:
                 context = dict(base_context)
                 context['pressures'] = inner_pressures
                 context['scan_speed_config'] = speed
-                script_name = f"slide_{self._format_loop_value(float(speed))}ms.in"
-                script = self.render_template("sheetonsheet/slide.lmp", context)
+                script_name = (
+                    f"slide_{self._format_loop_value(float(speed))}ms.in"
+                )
+                script = self.render_template(
+                    "sheetonsheet/slide.lmp", context
+                )
                 self.write_file(f"lammps/{script_name}", script)
 
         logger.info("Inputs written to %s/lammps/", self.output_dir)

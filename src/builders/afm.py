@@ -261,6 +261,14 @@ class AFMSimulation(SimulationBase):
         sim = self.config.settings.simulation
         out = self.config.settings.output
 
+        reaxff_types = {'reaxff', 'reax/c'}
+        uses_reaxff = (
+            self.config.sheet.pot_type.lower() in reaxff_types or
+            self.config.tip.pot_type.lower() in reaxff_types or
+            self.config.sub.pot_type.lower() in reaxff_types
+        )
+        atom_style = 'charge' if uses_reaxff else 'atomic'
+
         if self.config.general.scan_speed is None:
             raise ValueError("scan_speed must be specified in [general] section")
 
@@ -335,6 +343,7 @@ class AFMSimulation(SimulationBase):
             'minimization_command': sim.minimization_command,
             'output_dir': f"{self.relative_run_dir_layer[n_layers]}/data",
             'dump_file': f"{self.relative_run_dir_layer[n_layers]}/visuals/system.lammpstrj",
+            'atom_style': atom_style,
         }
 
         init_script = self.render_template("afm/system_init.lmp", context)

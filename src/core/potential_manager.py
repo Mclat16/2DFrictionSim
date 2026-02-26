@@ -26,9 +26,10 @@ from src.core.utils import count_atomtypes, lj_params, cifread
 
 logger = logging.getLogger(__name__)
 
-POTENTIALS_WITH_INTERNAL_LJ = {'airebo', 'comb', 'comb3', 'reaxff'}
+POTENTIALS_WITH_INTERNAL_LJ = {'airebo', 'rebomos', 'comb', 'comb3', 'reaxff', 'reax/c'}
 POTENTIALS_REQUIRING_LJ = {'sw', 'tersoff', 'rebo', 'edip', 'meam', 'eam', 'bop',
-                            'morse', 'rebomos', 'sw/mod', 'extep', 'vashishta'}
+                            'morse',  'sw/mod', 'extep', 'vashishta'}
+REAXFF_TYPES = {'reaxff', 'reax/c'}
 
 
 @dataclass
@@ -313,7 +314,7 @@ class PotentialManager:
         cif_data = cifread(config.cif_path)
         elements = cif_data['elements']
 
-        pot_counts = count_atomtypes(config.pot_path, elements)
+        pot_counts = count_atomtypes(config.pot_path, elements, pot_type=config.pot_type)
 
         self.potential_usage[config.pot_type] += n_layers if self.is_sheet_lj(config.pot_type) else 1
 
@@ -807,19 +808,58 @@ class PotentialManager:
 
         return "\n".join(lines)
 
+    def _is_single_potential(self) -> bool:
+        """Check if only one potential style is in use (no hybrid needed)."""
+        total = sum(self.potential_usage.values())
+        return total <= 1 and not self.cross_interaction_commands
+
+    @staticmethod
+    def _strip_hybrid_prefix(cmd: str) -> str:
+        """Strip the pot_type and index from a hybrid-style pair_coeff command.
+
+        Converts 'pair_coeff * * sw 1 /path Mo S # comment'
+        to 'pair_coeff * * /path Mo S # comment' for non-hybrid mode.
+        """
+        parts = cmd.split('#', 1)
+        main = parts[0].strip()
+        comment = f" # {parts[1].strip()}" if len(parts) > 1 else ""
+
+        tokens = main.split()
+        # pair_coeff * * pot_type [index] path elements...
+        # Find the path token (starts with / or contains .)
+        for i in range(3, len(tokens)):
+            if '/' in tokens[i] or '.' in tokens[i]:
+                # Everything from path onward is kept
+                cleaned = ' '.join(tokens[:3] + tokens[i:])
+                return f"{cleaned}{comment}"
+
+        return cmd
+
     def write_file(self, output_path: Path):
         """Write the complete potential settings file.
 
         Args:
             output_path: Path for the output file (e.g., system.in.settings).
         """
+        lj_cutoff = self.settings.potential.lj_cutoff
+        has_lj = bool(self.cross_interaction_commands) or self.virtual_atom_type is not None
+        total_pots = sum(self.potential_usage.values())
+        use_hybrid = total_pots > 1 or has_lj
+
+        # Build pair_style parts; ReaxFF needs NULL + keywords when in hybrid
         style_parts = []
         for pot_type, count in self.potential_usage.items():
             for _ in range(count):
-                style_parts.append(pot_type)
+                if use_hybrid and pot_type.lower() in REAXFF_TYPES:
+                    safezone = self.settings.potential.reaxff_safezone
+                    mincap = self.settings.potential.reaxff_mincap
+                    style_parts.append(
+                        f"{pot_type} NULL safezone {safezone} mincap {mincap}"
+                    )
+                else:
+                    style_parts.append(pot_type)
 
-        lj_cutoff = self.settings.potential.lj_cutoff
-        if self.cross_interaction_commands:
+        if has_lj:
             style_parts.append(f"lj/cut {lj_cutoff}")
 
         output_path = Path(output_path)
@@ -830,12 +870,29 @@ class PotentialManager:
             f.write("\n")
             f.write(self.get_component_groups_string())
             f.write("\n")
-            f.write(f"pair_style hybrid {' '.join(style_parts)}\n")
+
+            if use_hybrid:
+                f.write(f"pair_style hybrid {' '.join(style_parts)}\n")
+            elif style_parts:
+                pot = style_parts[0]
+                if pot.lower() in REAXFF_TYPES:
+                    safezone = self.settings.potential.reaxff_safezone
+                    mincap = self.settings.potential.reaxff_mincap
+                    f.write(
+                        f"pair_style {pot} NULL"
+                        f" safezone {safezone}"
+                        f" mincap {mincap}\n"
+                    )
+                else:
+                    f.write(f"pair_style {pot}\n")
 
             if self.self_interaction_commands:
                 f.write("# Self-interactions (intra-component)\n")
                 for cmd in self.self_interaction_commands:
-                    f.write(f"{cmd}\n")
+                    if use_hybrid:
+                        f.write(f"{cmd}\n")
+                    else:
+                        f.write(f"{self._strip_hybrid_prefix(cmd)}\n")
                 f.write("\n")
 
             if self.cross_interaction_commands:

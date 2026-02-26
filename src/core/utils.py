@@ -4,7 +4,6 @@ This module provides tools for reading, writing, and modifying simulation
 files (e.g., CIF, LAMMPS data), parsing configuration files, and calculating
 physical parameters like Lennard-Jones coefficients.
 """
-from importlib import resources
 import configparser
 import json
 import re
@@ -13,89 +12,54 @@ from typing import Dict, List, Tuple, Union, Any, Optional
 import math
 from ase.io import read as ase_read
 
-from src.data.potentials import UFF_params as lj
+from src.core import UFF_params as lj
 
-def get_material_path(mat_name: str, file_type: str = 'cif') -> Path:
-    """Find material files in the package data.
+def get_material_path(mat_name: str) -> Path:
+    """Find material files.
 
     Args:
         mat_name: Material identifier or file path.
-        file_type: File type extension (default 'cif').
 
     Returns:
         Path to the material file.
+
+    Raises:
+        FileNotFoundError: If the material file is not found.
     """
     user_path = Path(mat_name)
     if user_path.exists():
         return user_path
 
-    mat_dir = resources.files('src.data.materials')
-
-    candidates = [
-        mat_dir.joinpath(mat_name),
-        mat_dir.joinpath(f"{mat_name}.{file_type}"),
-        mat_dir.joinpath('cif').joinpath(mat_name),
-        mat_dir.joinpath('cif').joinpath(f"{mat_name}.{file_type}"),
-    ]
-
-    for candidate in candidates:
-        try:
-            if candidate.is_file():
-                return Path(str(candidate))
-        except (TypeError, AttributeError):
-            if isinstance(candidate, Path) and candidate.exists():
-                return candidate
-
-    return user_path
+    raise FileNotFoundError(
+        f"Material file '{mat_name}' not found. "
+        f"Please provide a valid path to a CIF file."
+        f"For a collection of 2D material CIF files, check the 'examples/materials' "
+        f"folder in the GitHub repository: https://github.com/Mclat16/FrictionSim2D"
+    )
 
 def get_potential_path(pot_name: str) -> Path:
-    """Find potential files in the package data recursively.
-
-    Handles cases where potentials are in subfolders like 'sw/', 'tersoff/'.
+    """Find potential files.
 
     Args:
         pot_name: Potential name or file path.
 
     Returns:
         Path to the potential file.
+
+    Raises:
+        FileNotFoundError: If the potential file is not found.
     """
-    pot_dir = resources.files('src.data.potentials')
+    pot_path = Path(pot_name)
+    if pot_path.exists():
+        return pot_path
 
-    direct_path = pot_dir.joinpath(pot_name)
-    if direct_path.is_file():
-        return Path(str(direct_path))
-
-    target_name = Path(pot_name).name
-    ext = Path(pot_name).suffix.lstrip('.')
-
-    subdir_map = {
-        'sw': 'sw',
-        'tersoff': 'tersoff',
-        'rebo': 'rebo',
-        'airebo': 'airebo',
-        'reaxff': 'reaxff',
-        'meam': 'meam',
-        'extep': 'extep',
-        'vashishta': 'vashishta',
-        'adp': 'adp',
-        'bop': 'bop',
-    }
-
-    if ext in subdir_map:
-        subdir = subdir_map[ext]
-        subdir_path = pot_dir.joinpath(subdir).joinpath(target_name)
-        if subdir_path.is_file():
-            return Path(str(subdir_path))
-
-    for subdir in subdir_map.values():
-        try:
-            subdir_traversable = pot_dir.joinpath(subdir).joinpath(target_name)
-            if subdir_traversable.is_file():
-                return Path(str(subdir_traversable))
-        except (TypeError, FileNotFoundError):
-            continue
-
-    return Path(pot_name)
+    raise FileNotFoundError(
+        f"Potential file '{pot_name}' not found. "
+        f"Please provide a valid path to a potential file. "
+        f"For a collection of potential files (sw, tersoff, rebo, reaxff, etc.), "
+        f"check the 'examples/potentials' folder in the GitHub repository: "
+        f"https://github.com/Mclat16/FrictionSim2D"
+    )
 
 def cifread(cif_path: Union[str, Path]) -> Dict[str, Any]:
     """Read a CIF file and extract crystal structure information using ASE.
@@ -133,12 +97,18 @@ def cifread(cif_path: Union[str, Path]) -> Dict[str, Any]:
         'filename': filename
     }
 
-def count_atomtypes(potential_filepath: Union[str, Path], elements: List[str]) -> Dict[str, int]:
+def count_atomtypes(
+    potential_filepath: Union[str, Path],
+    elements: List[str],
+    pot_type: Optional[str] = None
+) -> Dict[str, int]:
     """Count the number of different atom types per element in a potential file.
 
     Args:
         potential_filepath: Path to the LAMMPS potential file.
         elements: List of element symbols to look for.
+        pot_type: Potential type string (e.g., 'sw', 'reaxff'). Used as
+            fallback when file extension is ambiguous.
 
     Returns:
         Dictionary where keys are element names and values are the count of
@@ -146,8 +116,12 @@ def count_atomtypes(potential_filepath: Union[str, Path], elements: List[str]) -
     """
     elem_type = {el: 0 for el in elements}
     str_path = str(potential_filepath)
+    pot_lower = (pot_type or '').lower()
 
-    if str_path.lower().endswith(('.rebo', '.rebomos', '.airebo', '.meam', '.reaxff')):
+    single_type_pots = {'reaxff', 'reax/c', 'rebo', 'rebomos', 'airebo', 'meam'}
+    single_type_exts = ('.rebo', '.rebomos', '.airebo', '.meam', '.reaxff')
+
+    if pot_lower in single_type_pots or str_path.lower().endswith(single_type_exts):
         return {el: 1 for el in elements}
 
     pattern = re.compile(r'([A-Za-z]+)(\d*)')
@@ -290,6 +264,48 @@ def read_config(filepath: Union[str, Path]) -> Dict[str, Dict[str, Any]]:
             else:
                 params[section][key] = value
     return params
+
+def atomic2charge(filepath: Union[str, Path]) -> None:
+    """Convert a LAMMPS data file from atomic to charge format in-place.
+
+    Modifies the "Atoms" section of a LAMMPS data file, changing the style
+    from 'atomic' to 'charge' and inserting a zero charge field between
+    atom type and position. No-op if the file is already in charge format.
+
+    Args:
+        filepath: Path to the LAMMPS data file to be modified.
+    """
+    with open(filepath, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    atoms_section = False
+    modified_lines = []
+
+    for line in lines:
+        line = line.strip()
+
+        if line.startswith("Velocities"):
+            break
+
+        if line == "Atoms # atomic":
+            modified_lines.append("Atoms # charge")
+            atoms_section = True
+            continue
+
+        if atoms_section and line:
+            parts = line.split()
+            if len(parts) >= 5 and all(c in '0123456789.-+eE' for c in parts[0]):
+                atom_id = parts[0]
+                atom_type = parts[1]
+                x, y, z = parts[2:5]
+                modified_lines.append(f"{atom_id} {atom_type} 0.0 {x} {y} {z}")
+                continue
+
+        modified_lines.append(line)
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write("\n".join(modified_lines) + "\n")
+
 
 def atomic2molecular(filepath: Union[str, Path]) -> None:
     """Convert a LAMMPS data file from atomic to molecular format in-place.

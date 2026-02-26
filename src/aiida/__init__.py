@@ -30,6 +30,9 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     'import_archive': ('src.aiida.integration', 'import_archive'),
     'LammpsFrictionCalcJob': ('src.aiida.calcjob', 'LammpsFrictionCalcJob'),
     'FrictionWorkChain': ('src.aiida.workchain', 'FrictionWorkChain'),
+    'run_with_aiida': ('src.aiida.submit', 'run_with_aiida'),
+    'smart_submit': ('src.aiida.submit', 'smart_submit'),
+    'full_setup': ('src.aiida.setup', 'full_setup'),
 }
 
 __all__ = ['AIIDA_AVAILABLE', 'load_aiida_profile']

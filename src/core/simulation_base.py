@@ -4,7 +4,7 @@ This module provides the abstract base class `SimulationBase`, which defines
 the common interface and utility methods (template rendering, directory setup)
 required by all specific simulation types (AFM, Sheet-on-Sheet, etc.).
 """
-
+import os
 import logging
 from abc import ABC
 from pathlib import Path
@@ -14,12 +14,13 @@ import json
 from datetime import datetime
 import hashlib
 
-from jinja2 import Environment
+from jinja2 import Environment, FileSystemLoader
 
 from src.interfaces.atomsk import AtomskWrapper
 from src.interfaces.jinja import PackageLoader
 from src.core.config import get_material_path, get_potential_path
 from src.hpc import HPCScriptGenerator, HPCConfig
+from src.hpc.manifest import JobManifest
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +155,9 @@ class SimulationBase(ABC):
             ext = file_path.suffix.lower()
             if ext == '.cif':
                 category = 'cif'
-            elif ext in ('.sw', '.tersoff', '.eam', '.meam', '.rebo', '.airebo'):
+            elif ext in ('.sw', '.tersoff', '.rebo', '.airebo', '.reaxff', '.meam', 
+                        '.extep', '.vashishta', '.adp', '.bop', '.eam', '.edip', 
+                        '.comb', '.comb3', '.morse', '.rebomos', '.mod'):
                 category = 'potential'
             else:
                 category = 'other'
@@ -268,7 +271,7 @@ class SimulationBase(ABC):
             config: Component config object (TipConfig, SubstrateConfig, SheetConfig, etc.)
         """
         cif = getattr(config, 'cif_path', None) or (
-            get_material_path(config.mat, 'cif') if hasattr(config, 'mat') and config.mat else None
+            get_material_path(config.mat) if hasattr(config, 'mat') and config.mat else None
         )
         if cif:
             try:
@@ -287,9 +290,10 @@ class SimulationBase(ABC):
 
     def _generate_hpc_scripts(self) -> None:
         """Generate HPC job submission scripts for all simulations.
-        
+
         This method should be called after all simulation files are written.
-        It collects simulation paths and generates appropriate HPC scripts.
+        It creates a manifest of all jobs and generates appropriate HPC scripts.
+        For AFM simulations with system.in files, creates two-phase jobs with dependencies.
         """
 
         if self.base_output_dir is not None and self.base_output_dir != self.output_dir:
@@ -301,11 +305,17 @@ class SimulationBase(ABC):
         hpc_dir = self._get_hpc_output_dir()
         hpc_dir.mkdir(parents=True, exist_ok=True)
 
-        simulation_paths = self._collect_simulation_paths()
+        sim_root = self.base_output_dir if self.base_output_dir is not None else self.output_dir
+        manifest = JobManifest.from_simulation_directory(
+            sim_root,
+            name=self._get_hpc_job_name()
+        )
 
-        if not simulation_paths:
-            logger.warning("No simulations found for HPC script generation")
+        if manifest.n_jobs == 0:
+            logger.warning("No simulation jobs found for HPC script generation")
             return
+
+        logger.info("Created manifest with %d jobs", manifest.n_jobs)
 
         job_name = self._get_hpc_job_name()
 
@@ -314,8 +324,6 @@ class SimulationBase(ABC):
             job_name=job_name
         )
 
-        if not hpc_config.log_dir:
-            raise ValueError("HPC log_dir is required to generate job scripts.")
         if not hpc_config.modules:
             raise ValueError("HPC modules list is empty; set hpc.modules in settings.")
         if hpc_config.use_tmpdir and not hpc_config.scratch_dir:
@@ -323,17 +331,59 @@ class SimulationBase(ABC):
 
         generator = HPCScriptGenerator(hpc_config)
 
-        base_dir = '$PBS_O_WORKDIR' if hpc_config.scheduler_type == 'pbs' else '$SLURM_SUBMIT_DIR'
+        if hpc_config.hpc_home:
+            base_dir = hpc_config.hpc_home.rstrip('/') + '/' + sim_root.name
+        elif hpc_config.scheduler_type == 'pbs':
+            base_dir = '$PBS_O_WORKDIR'
+        else:
+            base_dir = '$SLURM_SUBMIT_DIR'
 
-        scripts = generator.generate_scripts(
-            simulation_paths=simulation_paths,
-            output_dir=hpc_dir,
-            scheduler=self.config.settings.hpc.scheduler_type,
-            base_dir=base_dir,
-            log_dir=hpc_config.log_dir
-        )
+        manifest_json_path = hpc_dir / 'manifest.json'
+        manifest.save(manifest_json_path)
+        logger.info("Saved manifest to %s", manifest_json_path)
 
-        logger.info("Generated %d HPC scripts in %s", len(scripts), hpc_dir)
+        if manifest.has_system_jobs():
+            logger.info("Detected system initialization jobs - using two-phase submission")
+            scripts = generator.generate_two_phase_scripts(
+                manifest=manifest,
+                output_dir=hpc_dir,
+                scheduler=self.config.settings.hpc.scheduler_type,
+                base_dir=base_dir
+            )
+            n_scripts = len(scripts['system']) + len(scripts['slide'])
+            logger.info("Generated %d HPC scripts (system + slide) in %s", n_scripts, hpc_dir)
+        else:
+            logger.info("No system jobs detected - using single-phase submission")
+            slide_manifest_path = hpc_dir / 'manifest_slide.txt'
+            manifest.save_script_list(slide_manifest_path)
+
+            slide_manifest_rel = f"{base_dir}/hpc/manifest_slide.txt"
+
+            templates_dir = Path(os.path.dirname(__file__)).parent / 'templates' / 'hpc'
+            jinja_env = Environment(
+                loader=FileSystemLoader(templates_dir),
+                trim_blocks=True,
+                lstrip_blocks=True
+            )
+
+            context = hpc_config.to_dict()
+            context.update({
+                'array_size': manifest.n_jobs,
+                'manifest_file': slide_manifest_rel,
+                'base_dir': base_dir,
+                'log_dir': f"{base_dir}/logs",
+                'job_name': job_name,
+            })
+
+            template_name = 'pbs_array.j2' if hpc_config.scheduler_type == 'pbs' else 'slurm_array.j2'
+            template = jinja_env.get_template(template_name)
+            script_content = template.render(context)
+
+            script_name = 'run.pbs' if hpc_config.scheduler_type == 'pbs' else 'run.sh'
+            script_path = hpc_dir / script_name
+            script_path.write_text(script_content)
+
+            logger.info("Generated HPC script in %s", hpc_dir)
 
     def _get_hpc_output_dir(self) -> Path:
         """Get the output directory for HPC scripts.

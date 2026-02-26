@@ -11,8 +11,6 @@ import subprocess
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
-import yaml
-
 if TYPE_CHECKING:
     from aiida import orm
 
@@ -201,22 +199,28 @@ def setup_lammps_code(
     return code
 
 
-def setup_computer_from_config(config_path: Path) -> 'orm.Computer':
-    """Register an AiiDA computer from a YAML config.
+def setup_computer_from_hpc_settings(
+    hpc_settings: 'HPCSettings',
+    aiida_settings: 'AiidaSettings',
+) -> 'orm.Computer':
+    """Register an AiiDA computer from settings.
 
-    Expected YAML fields:
-        label, scheduler, hostname, workdir, transport, queue, project
-        Optional SSH fields: username, ssh_port, key_filename
+    Args:
+        hpc_settings: HPCSettings from GlobalSettings.hpc
+        aiida_settings: AiidaSettings from GlobalSettings.aiida
+
+    Returns:
+        Configured AiiDA Computer instance
     """
     from aiida import orm  # pylint: disable=import-outside-toplevel
+    from src.core.config import HPCSettings, AiidaSettings
 
-    data = yaml.safe_load(Path(config_path).read_text(encoding='utf-8')) or {}
-    label = data.get('label', 'hpc')
-    scheduler = data.get('scheduler') or 'pbs'
-    transport = data.get('transport') or 'ssh'
+    label = aiida_settings.computer_label or 'hpc'
+    scheduler = hpc_settings.scheduler_type
+    transport = aiida_settings.transport
 
     scheduler_type = _SCHEDULER_MAP.get(scheduler, scheduler) or 'core.pbspro'
-    transport_type = _TRANSPORT_MAP.get(transport, transport) or 'core.ssh'
+    transport_type = _TRANSPORT_MAP.get(transport, transport) or 'core.local'
 
     try:
         computer = orm.Computer.collection.get(label=label)
@@ -227,25 +231,24 @@ def setup_computer_from_config(config_path: Path) -> 'orm.Computer':
 
     computer = orm.Computer(
         label=label,
-        hostname=data.get('hostname', 'localhost'),
+        hostname=aiida_settings.hostname or 'localhost',
         description=f"HPC computer ({scheduler})",
         transport_type=transport_type,
         scheduler_type=scheduler_type,
-        workdir=data.get('workdir', str(Path.home() / 'aiida_workdir')),
+        workdir=aiida_settings.workdir or str(Path.home() / 'aiida_workdir'),
     )
     computer.store()
 
     if transport_type == 'core.ssh':
         computer.configure(
-            username=data.get('username'),
-            port=data.get('ssh_port', 22),
-            key_filename=data.get('key_filename'),
-            look_for_keys=True,
+            username=aiida_settings.username or '',
+            port=aiida_settings.ssh_port,
+            key_filename=aiida_settings.key_filename or '',
+            safe_interval=30.0
         )
-    else:
-        computer.configure()
 
-    logger.info("Registered computer '%s' (%s)", label, scheduler_type)
+    computer.set_default_mpiprocs_per_machine(hpc_settings.num_cpus)
+    logger.info("Registered computer '%s' (PK=%d)", label, computer.pk)
     return computer
 
 
@@ -318,7 +321,8 @@ def full_setup(
     lammps_label: str = 'lammps',
     lammps_executable: Optional[str] = None,
     start_daemon_workers: int = 1,
-    hpc_config: Optional[Path] = None,
+    hpc_settings: Optional['HPCSettings'] = None,
+    aiida_settings: Optional['AiidaSettings'] = None,
 ) -> dict:
     """Complete AiiDA setup for FrictionSim2D on HPC.
 
@@ -326,7 +330,7 @@ def full_setup(
 
     1. Start RabbitMQ broker (``rabbitmq-server -detached``)
     2. Create AiiDA profile (``verdi presto --use-postgres``)
-    3. Register localhost as an AiiDA computer
+    3. Register localhost or remote HPC as an AiiDA computer
     4. Register the LAMMPS code
     5. Start the AiiDA daemon
 
@@ -337,24 +341,34 @@ def full_setup(
 
     Args:
         profile_name: AiiDA profile name.
-        computer_label: Computer label.
+        computer_label: Computer label (used if no HPC settings provided).
         lammps_label: LAMMPS code label.
         lammps_executable: Path to LAMMPS (auto-detected if ``None``).
         start_daemon_workers: Number of daemon workers to start.
+        hpc_settings: HPCSettings from settings.yaml (preferred method).
+        aiida_settings: AiidaSettings from settings.yaml (preferred method).
 
     Returns:
         Dict with setup results (``rabbitmq``, ``profile``, ``computer``,
         ``code``, ``daemon``).
     """
+    from src.core.config import HPCSettings, AiidaSettings
+
     results = {}
 
     results['rabbitmq'] = start_rabbitmq()
     results['profile'] = setup_profile(profile_name)
-    if hpc_config:
-        results['computer'] = setup_computer_from_config(hpc_config)
+
+    if hpc_settings or aiida_settings:
+        resolved_hpc = hpc_settings or HPCSettings()
+        resolved_aiida = aiida_settings or AiidaSettings()
+        results['computer'] = setup_computer_from_hpc_settings(
+            resolved_hpc, resolved_aiida
+        )
         computer_label = results['computer'].label
     else:
         results['computer'] = setup_localhost_computer(computer_label)
+
     results['code'] = setup_lammps_code(
         lammps_label, computer_label, lammps_executable
     )
