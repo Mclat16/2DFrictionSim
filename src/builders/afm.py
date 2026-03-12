@@ -196,6 +196,7 @@ class AFMSimulation(SimulationBase):
             potentials_dir=self.output_dir / "provenance" / "potentials",
             potentials_prefix=str(self.relative_run_dir / "provenance" / "potentials"),
         )
+        pm.set_lj_overrides(self.config.lj_override)
 
         pm.register_component('sub', self.config.sub)
         pm.register_component('tip', self.config.tip)

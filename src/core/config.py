@@ -229,12 +229,14 @@ class AFMSimulationConfig(BaseModel):
     tip: TipConfig
     sub: SubstrateConfig
     sheet: SheetConfig = Field(..., alias='2D')
+    lj_override: Dict[str, Any] = Field(default_factory=dict, alias='lj_override')
     settings: GlobalSettings
 
 class SheetOnSheetSimulationConfig(BaseModel):
     """Master configuration object for a Sheet-on-Sheet simulation run."""
     general: GeneralConfig
     sheet: SheetConfig = Field(..., alias='2D')
+    lj_override: Dict[str, Any] = Field(default_factory=dict, alias='lj_override')
     settings: GlobalSettings
 
 # --- Helper Functions ---

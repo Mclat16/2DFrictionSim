@@ -176,6 +176,24 @@ Crystal structure files must be in CIF format. FrictionSim2D uses Atomsk to:
 
 ## Advanced Configuration
 
+### Custom LJ Overrides
+
+You can override Lennard-Jones coefficients used for cross/interlayer interactions
+by adding an optional `[lj_override]` section.
+
+Each key is an element pair (order-independent), and each value is
+`[epsilon, sigma]` in LAMMPS units.
+
+```ini
+[lj_override]
+Mo-Mo = [1.0624, 3.878597]
+Mo-S = [0.4124, 3.75114]
+S-S = [0.198443, 3.62368]
+```
+
+Supported pair key formats include `Mo-S`, `Mo_S`, `Mo S`, and `Mo,S`.
+If a pair is not listed, FrictionSim2D falls back to default UFF mixing rules.
+
 ### Amorphous Materials
 
 Generate amorphous structures via quench-melt process:

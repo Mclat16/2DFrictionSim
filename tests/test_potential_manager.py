@@ -77,6 +77,56 @@ class TestIsSheetLJ:
         assert pm.is_sheet_lj('unknown_potential') is True
 
 
+class TestLJOverrides:
+    """Tests for user-provided LJ override behavior."""
+
+    def test_set_lj_overrides_parses_pair_keys(self, mock_settings):
+        """Pair keys should accept multiple separators and normalize order."""
+        pm = PotentialManager(mock_settings, use_langevin=False)
+        pm.set_lj_overrides({
+            'Mo-S': [0.4124, 3.75114],
+            'S_Mo': [0.4999, 3.9],
+        })
+
+        # Last assignment for the same canonical pair wins
+        assert pm.lj_overrides[('Mo', 'S')] == (0.4999, 3.9)
+
+    def test_interlayer_uses_override_values(
+        self, mock_settings, mos2_sheet_config
+    ):
+        """Interlayer pair_coeff should use override epsilon/sigma for matching pairs."""
+        import src.core.potential_manager as pm_module
+
+        def mock_cifread(path):
+            return {'elements': ['Mo', 'S']}
+
+        def mock_count(path, elements, pot_type=None):
+            return {el: 1 for el in elements}
+
+        original_cifread = pm_module.cifread
+        original_count = pm_module.count_atomtypes
+        pm_module.cifread = mock_cifread
+        pm_module.count_atomtypes = mock_count
+
+        try:
+            pm = PotentialManager(mock_settings, use_langevin=False)
+            pm.set_lj_overrides({
+                'Mo-Mo': [1.0624, 3.878597],
+                'Mo-S': [0.4124, 3.75114],
+                'S-S': [0.198443, 3.62368],
+            })
+            pm.register_component('sheet', mos2_sheet_config, n_layers=2)
+            pm.add_interlayer_interaction('sheet')
+
+            joined = "\n".join(pm.cross_interaction_commands)
+            assert 'lj/cut 1.0624 3.878597' in joined
+            assert 'lj/cut 0.4124 3.75114' in joined
+            assert 'lj/cut 0.198443 3.62368' in joined
+        finally:
+            pm_module.cifread = original_cifread
+            pm_module.count_atomtypes = original_count
+
+
 # =========================================================================
 # Use Case 1: Single-component Tip (amorphisation)
 # =========================================================================

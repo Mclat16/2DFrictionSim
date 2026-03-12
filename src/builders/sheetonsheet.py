@@ -164,6 +164,7 @@ class SheetOnSheetSimulation(SimulationBase):
                 self.relative_run_dir / "provenance" / "potentials"
             )
         )
+        pm.set_lj_overrides(self.config.lj_override)
 
         pm.register_component('sheet', self.config.sheet, n_layers=n_layers)
 

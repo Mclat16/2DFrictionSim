@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional, Union
 from collections import defaultdict
 import logging
+import re
 import shutil
 
 from ase.data import atomic_masses, atomic_numbers
@@ -252,8 +253,87 @@ class PotentialManager:
 
         self.self_interaction_commands: List[str] = []
         self.cross_interaction_commands: List[str] = []
+        self.lj_overrides: Dict[Tuple[str, str], Tuple[float, float]] = {}
 
         self.virtual_atom_type: Optional[int] = None
+
+    @staticmethod
+    def _normalize_element_symbol(value: str) -> str:
+        """Normalize element-like tokens to canonical symbol case."""
+        token = value.strip()
+        if not token:
+            return token
+        return token[0].upper() + token[1:].lower()
+
+    @classmethod
+    def _pair_key(cls, el1: str, el2: str) -> Tuple[str, str]:
+        """Build an order-independent key for an element pair."""
+        a = cls._normalize_element_symbol(el1)
+        b = cls._normalize_element_symbol(el2)
+        return tuple(sorted((a, b)))
+
+    @classmethod
+    def _parse_override_pair(cls, pair_key: str) -> Tuple[str, str]:
+        """Parse a pair key like 'Mo-S', 'Mo_S', 'Mo S', or 'Mo,S'."""
+        tokens = [tok for tok in re.split(r'[^A-Za-z]+', pair_key) if tok]
+        if len(tokens) != 2:
+            raise ValueError(
+                f"Invalid LJ override pair '{pair_key}'. "
+                "Expected two element symbols (e.g., 'Mo-S')."
+            )
+        return cls._normalize_element_symbol(tokens[0]), cls._normalize_element_symbol(tokens[1])
+
+    @staticmethod
+    def _parse_override_values(pair_key: str, values: Any) -> Tuple[float, float]:
+        """Parse epsilon/sigma override values from list/tuple or dict."""
+        if isinstance(values, (list, tuple)) and len(values) >= 2:
+            epsilon = float(values[0])
+            sigma = float(values[1])
+            return epsilon, sigma
+
+        if isinstance(values, dict):
+            if 'epsilon' not in values or 'sigma' not in values:
+                raise ValueError(
+                    f"Invalid LJ override values for '{pair_key}'. "
+                    "Dict entries must include 'epsilon' and 'sigma'."
+                )
+            return float(values['epsilon']), float(values['sigma'])
+
+        raise ValueError(
+            f"Invalid LJ override values for '{pair_key}'. "
+            "Use [epsilon, sigma] or {epsilon: ..., sigma: ...}."
+        )
+
+    def set_lj_overrides(self, overrides: Optional[Dict[str, Any]]) -> None:
+        """Set user-provided LJ overrides keyed by element pair.
+
+        Example:
+            {
+              "Mo-Mo": [1.0624, 3.878597],
+              "Mo-S": [0.4124, 3.75114],
+              "S-S": [0.198443, 3.62368]
+            }
+        """
+        self.lj_overrides = {}
+        if not overrides:
+            return
+
+        for pair_key, values in overrides.items():
+            el1, el2 = self._parse_override_pair(str(pair_key))
+            epsilon, sigma = self._parse_override_values(str(pair_key), values)
+            self.lj_overrides[self._pair_key(el1, el2)] = (epsilon, sigma)
+
+    def _get_lj_params(self, el1: str, el2: str) -> Tuple[float, float]:
+        """Return LJ parameters, preferring user overrides when present."""
+        override = self.lj_overrides.get(self._pair_key(el1, el2))
+        if override is not None:
+            return override
+        return lj_params(el1, el2)
+
+    @staticmethod
+    def _format_lj_value(value: float) -> str:
+        """Format LJ numeric values with high precision and no forced rounding."""
+        return f"{float(value):.15g}"
 
     def get_single_component_commands(
         self,
@@ -532,7 +612,7 @@ class PotentialManager:
                     epsilon = custom_params.get('epsilon', 0.0)
                     sigma = custom_params.get('sigma', 3.0)
                 else:
-                    epsilon, sigma = lj_params(el1, el2)
+                    epsilon, sigma = self._get_lj_params(el1, el2)
 
                 types1 = self.types.get_element_type_range(comp1_name, el1)
                 types2 = self.types.get_element_type_range(comp2_name, el2)
@@ -540,7 +620,9 @@ class PotentialManager:
                 if int(types1.split('*', maxsplit=1)[0]) > int(types2.split('*', maxsplit=1)[0]):
                     types1, types2 = types2, types1
 
-                cmd = f"pair_coeff {types1} {types2} {interaction_type} {epsilon:.6f} {sigma:.4f}"
+                eps_str = self._format_lj_value(epsilon)
+                sig_str = self._format_lj_value(sigma)
+                cmd = f"pair_coeff {types1} {types2} {interaction_type} {eps_str} {sig_str}"
                 self.cross_interaction_commands.append(f"{cmd} # {el1}({comp1_name})-{el2}({comp2_name})")
 
     def add_interlayer_interaction(
@@ -573,7 +655,7 @@ class PotentialManager:
         for layer_i, layer_j in layer_pairs:
             for el1 in elements:
                 for el2 in elements:
-                    epsilon, sigma = lj_params(el1, el2)
+                    epsilon, sigma = self._get_lj_params(el1, el2)
                     if low_interaction:
                         epsilon = 1e-100  # Near-zero for ghost interaction
 
@@ -589,7 +671,9 @@ class PotentialManager:
                     if types_i[0] > types_j[0]:
                         t1_str, t2_str = t2_str, t1_str
 
-                    cmd = f"pair_coeff {t1_str} {t2_str} lj/cut {epsilon:g} {sigma:.4f}"
+                    eps_str = self._format_lj_value(epsilon)
+                    sig_str = self._format_lj_value(sigma)
+                    cmd = f"pair_coeff {t1_str} {t2_str} lj/cut {eps_str} {sig_str}"
                     self.cross_interaction_commands.append(
                         f"{cmd} # {el1}(L{layer_i+1})-{el2}(L{layer_j+1})"
                     )
@@ -673,7 +757,7 @@ class PotentialManager:
         max_sigma = 0.0
         for e1 in set(comp1['elements']):
             for e2 in set(comp2['elements']):
-                _, sigma = lj_params(e1, e2)
+                _, sigma = self._get_lj_params(e1, e2)
                 max_sigma = max(max_sigma, sigma)
 
         return max_sigma + buffer
